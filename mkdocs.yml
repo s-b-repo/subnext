@@ -1,0 +1,34 @@
+site_name: Dynamic Context Runtime
+site_description: A specification wiki for a stateful, multi-representation context runtime above the RLM primitive.
+docs_dir: docs
+theme:
+  name: readthedocs
+nav:
+  - Home: index.md
+  - Motivation: motivation.md
+  - Concepts:
+      - Representation ladder: concepts/representation-ladder.md
+      - Stateful memory: concepts/stateful-memory.md
+      - Facts as cache: concepts/fact-cache.md
+      - Context as a graph: concepts/context-graph.md
+      - Speculative context: concepts/speculative-context.md
+      - Context as a state machine: concepts/state-machine.md
+      - Attention budget: concepts/attention-budget.md
+      - Cost model: concepts/cost-model.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Two-system split: architecture/two-system-split.md
+      - State Indexer: architecture/state-indexer.md
+      - Memory Graph: architecture/memory-graph.md
+      - Relevance Planner: architecture/relevance-planner.md
+      - Decision Policy: architecture/decision-policy.md
+      - Provenance: architecture/provenance.md
+  - Comparison: comparison.md
+  - Open questions: open-questions.md
+  - Roadmap: roadmap.md
+  - FAQ: faq.md
+  - Glossary: glossary.md
+markdown_extensions:
+  - tables
+  - fenced_code
+  - toc
