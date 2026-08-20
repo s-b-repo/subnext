@@ -7,6 +7,7 @@
 ```bash
 cargo run --release -- demo    # worked example: correction, exact quote, justification, recompute
 cargo run --release -- bench   # DCR vs full context vs sliding window
+cargo run --release -- bench --baselines   # …and vs RAG, summarize-all, recursive
 ```
 
 **Thesis:** RLMs (Recursive Language Models) don't solve context rot. They move the problem
@@ -60,6 +61,7 @@ current computation.
 | [Context as a state machine](docs/concepts/state-machine.md) | Transcript becomes an append-only audit log, not working memory. |
 | [Attention budget](docs/concepts/attention-budget.md) | Context assembly as constrained optimization: max `U(S)` s.t. `Σcost(x) ≤ B_attention`. |
 | [Cost model](docs/concepts/cost-model.md) | Aim at `O(k + r)` instead of `O(N²)` while `N` keeps growing. |
+| [Context integrity](docs/architecture/context-integrity.md) | Memory a reasoner trusts has to prove it returned what it stored. |
 
 ## Architecture
 
@@ -70,10 +72,15 @@ current computation.
 - [Relevance Planner](docs/architecture/relevance-planner.md)
 - [Runtime decision policy](docs/architecture/decision-policy.md)
 - [Provenance & evidence](docs/architecture/provenance.md)
+- [Context integrity: the `.context` container](docs/architecture/context-integrity.md)
+- [Failure modes](docs/architecture/failure-modes.md)
+- [Workspace rebuild](docs/architecture/workspace-rebuild.md)
 
 ## Also
 
 - [Comparison: RLM vs RAG vs DCR](docs/comparison.md)
+- [Alternatives considered](docs/alternatives.md)
+- [Architecture audit, Aug 2026](docs/audit-2026-08.md)
 - [Open questions](docs/open-questions.md)
 - [Glossary](docs/glossary.md)
 - [Roadmap](docs/roadmap.md)
@@ -84,14 +91,24 @@ current computation.
 `src/` is a zero-dependency Rust implementation of this specification: the
 immutable L0 store, the representation ladder, the typed memory graph with
 enforced provenance, the attention-budget knapsack, the relevance planner, the
-escalation protocol, speculative prefetch, and the telemetry the evaluation
-design asks for. See [IMPLEMENTATION.md](IMPLEMENTATION.md) for the module map,
-the measurements, and the honest limitations.
+escalation protocol, speculative prefetch, the tamper-evident `.context`
+container, and the telemetry the evaluation design asks for. See
+[IMPLEMENTATION.md](IMPLEMENTATION.md) for the module map, the measurements, and
+the honest limitations.
 
 Measured on a 300-turn synthetic incident transcript (27k tokens of history,
 `B_attention` = 1200): **467 tokens per query — 59x less attention than the full
-history — with `k` staying flat as history grows 33x.**
+history — with `k` staying flat as history grows 33x.** Against baselines that
+also retrieve, DCR answers 7/7 probes where top-k RAG answers 5/7 at 2.5x the
+tokens, and uniform summarisation answers 1/7.
 Full numbers, scaling table, and caveats: [RESULTS.md](RESULTS.md).
+
+Memory is persisted either as a plain JSON file or as a **`.context`
+container** — content-addressed objects under a Merkle root, checkpoints chained
+so that editing history invalidates everything after it, and a generation
+high-water mark that refuses a rollback. An edited JSON store reloads silently;
+an edited container does not load. Without a signer this is tamper-*evident*,
+not tamper-proof, and [says so](docs/architecture/context-integrity.md#9-what-this-does-not-defend-against).
 
 ## Paper
 
@@ -117,5 +134,8 @@ The PDF and the web version are both generated from `paper/paper.frag.html` by
 
 Specification plus reference implementation. Contributions are docs, critiques,
 worked examples, and code — see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Several results here exist because readers proposed the instrument. Who changed
+which claim, which artifact moved, and what stayed disputed: [CREDITS.md](CREDITS.md).
 
 License: [MIT](LICENSE) for the code in `src/`, `dcr/`, `tests/`, and `examples/`; [CC BY 4.0](LICENSE-DOCS) for the specification in `docs/` and the technical report in `paper/`.
