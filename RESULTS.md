@@ -236,6 +236,21 @@ aborts, because the check was previously a `debug_assert!` that `--release`
 compiled out, making it a control that could not fire inside the table it
 guarded. Four rows still do not establish equivalence.
 
+That check is reproducible, and worth reproducing rather than believing:
+
+```bash
+git worktree add /tmp/ctl HEAD          # never sabotage the working tree
+# in the copy, force the approximate path to answer differently at one size
+cargo run --release -- bench --scaling  # must abort, naming both figures
+```
+
+**It is not automated.** Three controls in this repository have turned out to be
+unable to fire, and all three were found by someone arguing about them rather
+than by a tool. That is not a method that reliably finds the fourth. A narrow
+lint — no debug assertions in paths that only ever run under `--release` — would
+have caught the most recent one when it was written; `src/` currently contains
+none, so such a gate would be green today and would fire the moment one returns.
+
 ---
 
 ## Spec-to-code mapping
