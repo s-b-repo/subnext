@@ -1,0 +1,303 @@
+<section class="abstract">
+<h2>Abstract</h2>
+<p>Language models degrade as irrelevant, stale, and superseded material accumulates in their context — a failure commonly called <em>context rot</em>. Enlarging the context window does not remove it: attention cost grows quadratically, mid-context material is used unreliably, and a corrected fact does not stop competing with the value it replaced. We describe the <strong>Dynamic Context Runtime</strong> (DCR), a system that separates <em>unbounded history</em> from <em>bounded attention</em>. History is stored as immutable, addressable spans and compiled into a typed dependency graph of facts, decisions, and derivations, each bound to the spans that ground it. Each turn, a planner assembles a small working set by solving a multiple-choice knapsack over (node, representation-level) pairs under an explicit token budget, so the model never sees the transcript — only the cheapest sufficient representation of what the current question needs.</p>
+<p>We give a zero-dependency Rust reference implementation (7,492 lines) that enforces the design's invariants in code rather than in prose: unsourced facts are rejected at insertion, nothing is deleted, and no stale node reaches the model. We evaluate it with a deliberately non-neural instrument — a deterministic line-matching reasoner shared by all conditions — which isolates the quality of <em>context assembly</em> from the quality of the model. On a 300-turn synthetic incident transcript (27,362 tokens), DCR answers all seven probes using 467 tokens per query on average, 59× less attention than the full history, and answers all seven from a 200-token budget. Across a 33× growth in history (8.5k → 283k tokens) the working set stays flat at ~420 tokens with no loss of correctness. An ablation identifies which mechanisms carry which probes — and reports two that carry nothing on this corpus. We state plainly what the evaluation cannot show: it is a synthetic corpus, the instrument is not a language model, and we do not compare against a recursive-language-model implementation.</p>
+</section>
+
+<h2 id="s1">1&ensp;Introduction</h2>
+
+<p>A long conversation is not a long document. It contains restatements, digressions, values that were later corrected, and reasoning whose conclusions have long since been settled. A model asked a question at turn 300 must find what matters inside all of it. Practice has converged on two responses: make the window bigger, or retrieve into it. Neither addresses the underlying problem, which is that <em>the transcript is being used as the working memory</em>.</p>
+
+<p>Bigger windows carry a quadratic attention cost in sequence length <span class="m">N</span> <span class="cite">[1]</span>, and empirically models use material in the middle of a long context less reliably than material at either end <span class="cite">[2]</span> — so the marginal token added to a window is not merely expensive, it can be actively harmful to what is already there. Retrieval-augmented generation <span class="cite">[3]</span> reduces the volume but collapses the problem to a single representation and a single signal: chunks, ranked by similarity. It has no notion that a retrieved chunk was superseded three turns ago, and no way to hand back an exact byte range when the question is "quote it verbatim" rather than "what is the gist".</p>
+
+<p>A more recent framing treats the context as a program variable: the model inspects, slices, and recursively queries it in a REPL rather than reading it as a flat prompt.<span class="fn">1</span> This is the right primitive — context as a manipulable object rather than a wall of text — but it relocates the problem rather than removing it. Every recursive subcall still reconstructs what it needs from raw text: re-reading the same spans, re-deriving the same conclusions, and stalling on slicing and compression at each level of recursion.</p>
+
+<p>Our position is that the missing layer is a <em>runtime</em>: a system that owns unbounded external state and hands the model a small, deliberately planned working set. The slogan is <strong>unlimited history ≠ unlimited attention</strong>, and the design consequence is that context assembly should be an explicit, budgeted optimisation problem rather than an emergent property of a prompt template.</p>
+
+<p><strong>Contributions.</strong></p>
+<ol>
+<li>A system design (§3) in which the same material exists simultaneously at four cost levels, facts are typed graph nodes bound to immutable source spans, revision is recorded rather than applied destructively, and the working set is chosen by an exact multiple-choice knapsack under a declared token budget.</li>
+<li>A zero-dependency Rust reference implementation (§4) in which the design's stated invariants are enforced by the type system and by runtime checks, not merely asserted in documentation.</li>
+<li>An evaluation methodology (§5) that isolates context assembly from model quality by holding the reasoner fixed and non-neural across all conditions, together with four measurements: a context-rot comparison, a scaling result showing the working set flat under 33× history growth, a budget sweep, and an ablation that names the load-bearing mechanisms — including two that are not load-bearing on our corpus.</li>
+<li>An explicit account (§6) of what this evaluation cannot establish.</li>
+</ol>
+
+<h2 id="s2">2&ensp;Background and related work</h2>
+
+<h3>2.1&ensp;Long context and its failure modes</h3>
+<p>Self-attention is quadratic in sequence length <span class="cite">[1]</span>, motivating a long line of efficiency work — sparse and sliding-window attention <span class="cite">[4]</span>, IO-aware exact attention <span class="cite">[5]</span> — that reduces the constant or the asymptotics of <em>computing</em> attention. That work is orthogonal to ours: it makes a large window cheaper to process, while we argue about what should be in the window at all. The positional reliability problem <span class="cite">[2]</span> is not addressed by making attention cheaper.</p>
+
+<h3>2.2&ensp;Retrieval-augmented generation</h3>
+<p>RAG <span class="cite">[3]</span> retrieves passages by learned or lexical similarity <span class="cite">[6,7]</span> and conditions generation on them. It is the closest deployed analogue to what we propose and differs on three axes. First, <em>unit</em>: RAG returns document chunks; DCR returns whichever representation is cheapest and sufficient, which may be an exact span, a structured fact, or a computed result. Second, <em>signal</em>: RAG ranks by similarity; DCR additionally traverses typed dependency edges, so justifying a decision is a graph walk rather than a hope that the evidence happens to be lexically similar to the question. Third, <em>state</em>: RAG's corpus is static with respect to the conversation, whereas DCR's store is written by the conversation and must therefore handle correction, contradiction, and staleness as first-class events.</p>
+
+<h3>2.3&ensp;Agent memory systems</h3>
+<p>Generative-agent architectures maintain a memory stream scored by recency, importance, and relevance <span class="cite">[8]</span>, and MemGPT <span class="cite">[9]</span> frames context management as virtual memory with paging between a fixed window and external storage. DCR shares the paging intuition and differs in what is paged and how the decision is made: the unit is a typed, provenance-bound node rather than a text fragment; the same node may be paged in at four different costs; and the selection is the solution to a stated optimisation problem rather than a heuristic score threshold. We also make invalidation explicit — a memory whose supporting fact changed is marked stale and excluded, rather than remaining eligible for retrieval at a lower score.</p>
+
+<h3>2.4&ensp;What databases already settled</h3>
+<p>Most of what a memory runtime does is not novel; it is a database problem that the language-model literature has been re-deriving. Provenance — the ability to say <em>where</em> a value came from and <em>why</em> it holds — is a well-studied property with formal characterisations <span class="cite">[10]</span>. Deciding when a cached derived value must be recomputed after its inputs change is materialised-view maintenance <span class="cite">[11]</span>. Reading a consistent snapshot while a background writer mutates the store is snapshot isolation <span class="cite">[12]</span>. Choosing a maximum-value subset under a capacity constraint, where each item has several mutually exclusive variants, is the multiple-choice knapsack problem <span class="cite">[13]</span>. Speculatively materialising state before it is requested, and discarding the work when the prediction was wrong, is prefetching <span class="cite">[14]</span>. DCR is in large part an argument that these should be imported wholesale rather than approximated.</p>
+
+<h2 id="s3">3&ensp;Design</h2>
+
+<h3>3.1&ensp;Two systems, asymmetric</h3>
+<p>DCR splits the agent into a <strong>Reasoner</strong> and a <strong>Memory Runtime</strong>. The Reasoner is a language model with a small, high-attention working set; it owns the current computational state and none of the history. The Memory Runtime owns everything ever seen and decides which representation of it to return. The asymmetry is the point: almost everything the Memory Runtime does — span addressing, index lookup, dependency traversal, memoisation, invalidation — requires no model inference at all. In our implementation the Memory Runtime makes zero model calls.</p>
+
+<figure class="figure-wide">
+FIGURE_ARCH
+<figcaption><strong>Figure 1.</strong> Per-turn data flow. Ingestion addresses raw bytes into immutable spans and extracts typed state; higher representation levels are built lazily. A query is classified, seeded from the index, expanded along dependency edges, assigned levels, and bounded by the attention budget. The model sees only the resulting working set, and may escalate a node to raw bytes if the compact form proves insufficient.</figcaption>
+</figure>
+
+<h3>3.2&ensp;The representation ladder</h3>
+<p>The same material is available at four levels of cost and fidelity:</p>
+<table class="small">
+<thead><tr><th>Level</th><th>Payload</th><th>Typical use</th></tr></thead>
+<tbody>
+<tr><td>L0</td><td>exact bytes of a span</td><td>quote, identifier, legal or audit fidelity</td></tr>
+<tr><td>L1</td><td>extractive summary</td><td>gist of a large span</td></tr>
+<tr><td>L2</td><td>structured state object</td><td>value lookup; the fact cache</td></tr>
+<tr><td>L3</td><td>computed result</td><td>a value that is a function of known inputs</td></tr>
+</tbody>
+</table>
+<p>Only L0 addressing is eager. L1, L2, and L3 are built on first demand and cached on the node, so ingesting a large document is cheap until something asks about it.</p>
+<p>L2 deserves a clarification, because "semantic vector" is not something a model can read. In DCR the vector is L2's <em>index key</em> and a structured state object is its <em>payload</em>. Admitting a node at L2 means the model sees</p>
+<pre class="snippet">server.ip = 10.0.9.7 · conf=0.90 · spans=s_9d6230ba</pre>
+<p>rather than the paragraph that sentence came from. This is the level at which a long transcript collapses into a few dozen objects, and it is why compression here is safe: the object carries pointers back to the exact bytes, so any loss is recoverable by escalation.</p>
+
+<h3>3.3&ensp;A typed graph with mandatory provenance</h3>
+<p>State is a directed graph of typed nodes — <span class="tt">evidence</span>, <span class="tt">claim</span>, <span class="tt">calculation</span>, <span class="tt">decision</span>, <span class="tt">goal</span>, <span class="tt">constraint</span>, <span class="tt">open_question</span> — connected by typed edges: <span class="tt">supports</span>, <span class="tt">derived-from</span>, <span class="tt">contradicts</span>, <span class="tt">supersedes</span>. Every node carries source spans, dependencies, a confidence, and a timestamp.</p>
+<p>Three invariants are enforced at insertion rather than documented:</p>
+<ol>
+<li><strong>Nothing enters ungrounded.</strong> Every non-evidence node must reach at least one evidence node through its dependencies. A cached fact with no spans is a hallucination with a database row, and the insertion path rejects it.</li>
+<li><strong>Nothing is deleted.</strong> Revision is a <span class="tt">supersedes</span> edge and a status change; conflict is a <span class="tt">contradicts</span> edge with both sides retained. The transcript stays a valid audit log because no correction ever rewrites history.</li>
+<li><strong>No stale node reaches the model.</strong> When a node's content changes, its transitive dependents are marked stale and excluded from planning until revalidated.</li>
+</ol>
+<p>Invalidation cascades are <em>bounded</em>. A single small correction can otherwise mark an arbitrarily large subgraph stale and stall the turn, so the runtime marks eagerly up to a cap and defers the tail to a lazy queue drained before the next plan.</p>
+
+<h3>3.4&ensp;Correction as a first-class event</h3>
+<p>The mechanism that most directly attacks context rot is what happens when a new claim disagrees with a live claim on the same subject key. The runtime records a <span class="tt">contradicts</span> edge, then — by default — supersedes the older node, which marks its dependents stale. The superseded node remains in the graph and is never planned into the window again.</p>
+<p>Two refinements proved necessary in practice. First, evidence spans that sourced a superseded value are annotated rather than hidden (<span class="tt">NOTE=contains a value corrected later; current value in …</span>): deleting them would break the audit log, but admitting them unmarked is exactly how a settled contradiction walks back into the window. Second, ingest order is only approximately chronological — files read from a directory, transcripts merged from two sources — so an explicitly corrective statement is protected: ordinary material arriving after it records a contradiction but does not supersede it, and both sides enter the window flagged for adjudication.</p>
+
+<h3>3.5&ensp;The attention budget</h3>
+<p>Given a budget <span class="m">B</span> in tokens, the runtime solves</p>
+<div class="eq">maximise &nbsp; <span class="m">U(S)</span> &nbsp;&nbsp; over <span class="m">S ⊆ M</span> &nbsp;&nbsp; subject to &nbsp; <span class="m">Σ<sub>x∈S</sub> cost(x) ≤ B</span></div>
+<p>where <span class="m">M</span> is the candidate set. Because the same node may be admitted at several levels, and at most one, this is a multiple-choice knapsack <span class="cite">[13]</span>. We solve it exactly by dynamic programming over quantised costs, with the quantum chosen so the table stays a fixed width regardless of budget; costs round up, so a solution can never exceed <span class="m">B</span>.</p>
+<p>Two properties follow from the formulation rather than from added heuristics. <strong>Demotion beats eviction</strong>: a cheaper level with non-zero value dominates the skip option, so under pressure the optimiser first moves nodes down the ladder and only then drops them. And <strong>the budget is a ceiling, not a target</strong>: when the plan needs less, the surplus is simply unspent — a behaviour visible in §5.6, where the working set stops growing at 467 tokens no matter how much budget is offered.</p>
+
+<h3>3.6&ensp;The planner</h3>
+<p>Each turn: (i) classify the query; (ii) seed by hybrid lexical–vector search over <em>state nodes</em>, discarding seeds below a fraction of the top score; (iii) expand along dependency edges with depth and fan-out caps; (iv) assign each candidate its cheapest sufficient level from a routing table; (v) solve the knapsack; (vi) score the remainder for speculative prefetch.</p>
+<p>Utility is a small, named, inspectable sum — similarity, graph proximity, membership of a demanded audit path, confidence, historical read-through, recency, a kind prior, a contradiction bonus, and penalties for staleness and for evidence whose dependents were superseded. We deliberately did not learn it. A wrong utility function is the design's dominant failure mode: it fills the window with cheap useless material <em>and looks efficient while doing so</em>. Keeping every term named means a bad answer can be traced to the term that caused it, and the implementation prints the per-node arithmetic on request.</p>
+
+<h3>3.7&ensp;Escalation</h3>
+<p>Deciding the cheapest level that can answer a query is the design's central open problem; there is no clean definition of sufficiency. We adopt the practical proxy: route by query type, then <em>measure</em> the error. If the compact form is insufficient the model replies <span class="tt">#ESCALATE &lt;node_id&gt;</span>, and the runtime re-plans with that node pinned at L0. Escalation rate is therefore a first-class metric — a rising rate is the signal that the router is wrong — and the extra tokens an escalation costs are charged to the turn that needed them.</p>
+
+<h3>3.8&ensp;Speculation and consistency</h3>
+<p>Nodes likely to be needed next are materialised in advance by an online logistic predictor over cheap features, trained on whether each prefetch was actually used. Prefetch consumes a <em>separate</em> materialisation budget denominated in build operations, never attention tokens: speculation that competes for the active window starves the computation it was meant to accelerate.</p>
+<p>Finally, the Memory Runtime consolidates in the background while the Reasoner is thinking, and may invalidate a fact the Reasoner is mid-way through using. Every plan records a store version; after the model answers, the runtime checks whether anything in the working set was invalidated during the call and rebuilds rather than returning an answer grounded in state that no longer holds. This is snapshot isolation with an interrupt <span class="cite">[12]</span>.</p>
+
+<h2 id="s4">4&ensp;Implementation</h2>
+
+<p>The reference implementation is 7,492 lines of Rust (edition 2024) with <strong>no external crates</strong>. Hashing, text scanning, JSON persistence, and argument parsing are all in-tree. This is a deliberate choice for a specification's reference implementation: a reader can audit every line that stands between the design and the measurement, and the build has no supply chain. A consequence worth stating is that the extractor is a hand-written scanner rather than a regular-expression engine — which turned out to read better as a parser than the pattern it replaced.</p>
+
+<table class="small">
+<caption><strong>Table 1.</strong> Module map. Each design element has one home.</caption>
+<thead><tr><th>Design element</th><th>Module</th></tr></thead>
+<tbody>
+<tr><td>L0 immutable raw store</td><td><span class="tt">spans.rs</span></td></tr>
+<tr><td>Representation ladder</td><td><span class="tt">ladder.rs</span></td></tr>
+<tr><td>Typed nodes, memory graph, provenance</td><td><span class="tt">nodes.rs</span>, <span class="tt">graph.rs</span></td></tr>
+<tr><td>Node extraction, contradiction, supersession</td><td><span class="tt">indexer.rs</span></td></tr>
+<tr><td>Hybrid lexical + vector index</td><td><span class="tt">index.rs</span></td></tr>
+<tr><td>Level routing, escalation, de-escalation</td><td><span class="tt">policy.rs</span></td></tr>
+<tr><td>Attention-budget knapsack</td><td><span class="tt">budget.rs</span></td></tr>
+<tr><td>Relevance planner</td><td><span class="tt">planner.rs</span></td></tr>
+<tr><td>Speculative prefetch</td><td><span class="tt">speculation.rs</span></td></tr>
+<tr><td>Execution layer, memoisation</td><td><span class="tt">execute.rs</span></td></tr>
+<tr><td>Telemetry</td><td><span class="tt">telemetry.rs</span></td></tr>
+<tr><td>Runtime facade, persistence</td><td><span class="tt">runtime.rs</span></td></tr>
+</tbody>
+</table>
+
+<p><strong>Determinism.</strong> Every ranking breaks ties on the item's own index and every persisted object preserves insertion order, so a plan never depends on hash iteration order. This matters more than it sounds: without it, an ablation cannot be attributed, because two runs of the same configuration may differ.</p>
+
+<p><strong>Structure.</strong> The graph is a vector of nodes plus an identifier index, with edges as index pairs — no reference-counted ownership cycles. Interior mutability is confined to exactly one place: the per-node level cache and the read counters, because materialising a cheaper representation is logically a read, and requiring an exclusive borrow there would prevent the planner from holding the graph while pricing what is in it.</p>
+
+<p><strong>Cost.</strong> The knapsack is <span class="m">O(n · B/q)</span> for <span class="m">n</span> candidates, budget <span class="m">B</span>, and quantum <span class="m">q</span> chosen to keep <span class="m">B/q</span> at a fixed 400. Lexical retrieval is sub-linear through an inverted index; vector retrieval is a linear scan over state nodes, which is the implementation's most consequential shortcut and is examined in §6.</p>
+
+<p>The implementation ships 71 tests. They encode the invariants as executable claims — that an unsourced fact is rejected, that a superseded node stays in the graph, that a stale node never enters a plan, that the knapsack never exceeds its budget and matches a brute-force optimum on small instances, and that the working set stays bounded as history grows.</p>
+
+<h2 id="s5">5&ensp;Evaluation</h2>
+
+<h3>5.1&ensp;The instrument</h3>
+<p>Evaluating a context runtime with a language model conflates two things: whether the right material was placed in the window, and whether the model then used it well. We therefore hold the reasoner fixed and <em>non-neural</em> across all conditions. Our instrument is a deterministic line matcher: it scores each line of whatever context it is given by token overlap with the question, returns the best line's value, and — when the best match is a compressed form it does not trust — emits an escalation request instead of guessing. It cannot paraphrase, cannot compose two facts, and cannot recover from being handed the wrong material.</p>
+<p>This is a severe instrument, and that is the intent. If an answer is wrong, the runtime put the wrong thing in the window; no model quality is available to mask it. §6 states what the instrument correspondingly cannot show.</p>
+
+<h3>5.2&ensp;Corpus and probes</h3>
+<p>The corpus is a synthetic operations transcript: ten substantive documents followed by long-form noise — standup notes, triage sweeps, metrics digests, handovers — with three corrections injected at 35%, 80%, and 90% of the way through. At 300 turns it is 27,362 tokens; the generator scales to any length. Seven probes exercise distinct failure modes (Table 2). Correctness is substring containment of a known answer, so it is checkable without a judge.</p>
+
+<table class="small figure-wide">
+<caption><strong>Table 2.</strong> Probe set. Each targets a different way a long-context system fails.</caption>
+<thead><tr><th>Probe</th><th>Question</th><th>Tests</th></tr></thead>
+<tbody>
+<tr><td>corrected fact (mid-history)</td><td>what is the server ip?</td><td>supersession of a value corrected mid-transcript</td></tr>
+<tr><td>corrected fact (late)</td><td>what is the deploy window?</td><td>supersession near the end</td></tr>
+<tr><td>old fact, never repeated</td><td>who is the owner of the checkout service?</td><td>recall of an early fact outside any recent window</td></tr>
+<tr><td>exact quote</td><td>quote the exact error message</td><td>byte-exact retrieval, not gist</td></tr>
+<tr><td>justification</td><td>why did we roll back?</td><td>retrieval of a decision with its reason</td></tr>
+<tr><td>detail buried in a long span</td><td>how many retry attempts were made?</td><td>a detail lost by compression; requires escalation</td></tr>
+<tr><td>corrected fact (very late)</td><td>what is the hourly rate?</td><td>a correction 90% of the way through</td></tr>
+</tbody>
+</table>
+
+<h3>5.3&ensp;Baselines</h3>
+<p>Two baselines share the instrument. <strong>Full context</strong> receives the entire transcript on every query. <strong>Sliding window</strong> receives the most recent 8,000 tokens. Both are given every advantage that is honest: on a scoring tie they prefer the <em>latest</em> matching line, so they answer a correction correctly whenever the correction is inside their view.</p>
+
+<h3>5.4&ensp;Result 1 — attention cost and context rot</h3>
+
+<table class="figure-wide">
+<caption><strong>Table 3.</strong> 300 turns, 27,362 tokens of history, <span class="m">B</span> = 1,200, window = 8,000. Tokens are per query.</caption>
+<thead><tr><th>Probe</th><th class="c">full context</th><th class="c">sliding window</th><th class="c">DCR</th><th class="r">DCR tokens</th></tr></thead>
+<tbody>
+<tr><td>corrected fact (mid-history)</td><td class="c ok">ok</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="r">163</td></tr>
+<tr><td>corrected fact (late)</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="r">456</td></tr>
+<tr><td>old fact, never repeated</td><td class="c miss">miss</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="r">399</td></tr>
+<tr><td>exact quote</td><td class="c miss">miss</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="r">963</td></tr>
+<tr><td>justification</td><td class="c ok">ok</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="r">192</td></tr>
+<tr><td>detail buried in a long span</td><td class="c ok">ok</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="r">962</td></tr>
+<tr><td>corrected fact (very late)</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="r">136</td></tr>
+<tr class="total"><td>correct</td><td class="c">5 / 7</td><td class="c">2 / 7</td><td class="c">7 / 7</td><td class="r">—</td></tr>
+<tr class="total"><td>mean tokens per query</td><td class="c">27,362</td><td class="c">7,968</td><td class="c">467</td><td class="r">59× less</td></tr>
+</tbody>
+</table>
+
+<p>The sliding window's five misses are the important ones, because they are <em>structural</em>: the server-IP correction and the service owner both fall outside the most recent 8,000 tokens, and no model quality recovers a fact that is not in the input. The full-context column should be read as a floor rather than a ceiling — a real language model reading the whole transcript would beat a line matcher on these probes. What no model quality changes is the token column.</p>
+<p>DCR's per-turn telemetry for this run: escalation rate 0.14, stale-fact read rate 0.00, audit-path completeness 1.00, three budget-forced demotions, zero budget overflows. The two expensive probes (963 and 962 tokens) are the two that escalated to raw bytes; that cost appears in the table rather than being hidden.</p>
+
+<h3>5.5&ensp;Result 2 — does <span class="m">k</span> stay flat?</h3>
+<p>The design targets a per-turn cost of <span class="m">O(k + r)</span> — active state plus bounded fresh retrieval — while total history <span class="m">N</span> grows without bound. The falsifiable version of that claim is simply: hold the budget fixed, grow the history, and watch the working set.</p>
+
+<figure class="figure-wide">
+FIGURE_SCALE
+<figcaption><strong>Figure 2.</strong> Total history and mean working-set size against corpus size, on log-spaced turn counts. The two panels carry their own scales deliberately — plotting a 283,000-token history and a 420-token working set on one axis would require a second scale and mislead. Both series are given exactly in Table 4.</figcaption>
+</figure>
+
+<table class="figure-wide">
+<caption><strong>Table 4.</strong> Scaling, <span class="m">B</span> = 800. Correctness holds at every size.</caption>
+<thead><tr><th class="r">turns</th><th class="r">history (tok)</th><th class="r">state nodes</th><th class="r">mean k</th><th class="r">max k</th><th class="c">correct</th><th class="r">ingest</th><th class="r">query</th></tr></thead>
+<tbody>
+<tr><td class="r">100</td><td class="r">8,482</td><td class="r">124</td><td class="r">422.1</td><td class="r">764</td><td class="c">7/7</td><td class="r">0.01 s</td><td class="r">0.6 ms</td></tr>
+<tr><td class="r">300</td><td class="r">27,362</td><td class="r">298</td><td class="r">417.0</td><td class="r">787</td><td class="c">7/7</td><td class="r">0.04 s</td><td class="r">1.3 ms</td></tr>
+<tr><td class="r">1,000</td><td class="r">93,442</td><td class="r">911</td><td class="r">404.0</td><td class="r">793</td><td class="c">7/7</td><td class="r">0.16 s</td><td class="r">2.9 ms</td></tr>
+<tr><td class="r">3,000</td><td class="r">283,253</td><td class="r">2,661</td><td class="r">418.7</td><td class="r">795</td><td class="c">7/7</td><td class="r">0.92 s</td><td class="r">15.1 ms</td></tr>
+</tbody>
+</table>
+
+<p>Across a 33× growth in history the mean working set moves by 1% and the maximum by 4%, with correctness unchanged. This supports the bounded-attention claim. It does <em>not</em> establish <span class="m">O(k + r)</span> end to end: the query-latency column grows 25× over the same range, because vector retrieval in this implementation is a linear scan over state nodes. The cost model requires sub-linear retrieval, and this implementation does not yet provide it. We consider that the most important gap between the design and the artefact.</p>
+
+<h3>5.6&ensp;Result 3 — how small can the window be?</h3>
+
+<table class="figure-wide">
+<caption><strong>Table 5.</strong> Budget sweep at 300 turns. The planner takes what it needs, not what it is given.</caption>
+<thead><tr><th class="r">B_attention</th><th class="c">correct</th><th class="r">mean k</th><th class="r">max k</th><th class="r">escalation rate</th><th class="r">demotions</th></tr></thead>
+<tbody>
+<tr><td class="r">120</td><td class="c">6 / 7</td><td class="r">104.9</td><td class="r">120</td><td class="r">0.14</td><td class="r">10</td></tr>
+<tr><td class="r">200</td><td class="c">7 / 7</td><td class="r">182.9</td><td class="r">200</td><td class="r">0.14</td><td class="r">4</td></tr>
+<tr><td class="r">300</td><td class="c">7 / 7</td><td class="r">239.7</td><td class="r">300</td><td class="r">0.14</td><td class="r">11</td></tr>
+<tr><td class="r">500</td><td class="c">7 / 7</td><td class="r">333.7</td><td class="r">500</td><td class="r">0.14</td><td class="r">10</td></tr>
+<tr><td class="r">800</td><td class="c">7 / 7</td><td class="r">417.0</td><td class="r">787</td><td class="r">0.14</td><td class="r">7</td></tr>
+<tr><td class="r">1,200</td><td class="c">7 / 7</td><td class="r">467.3</td><td class="r">963</td><td class="r">0.14</td><td class="r">3</td></tr>
+<tr><td class="r">2,000</td><td class="c">7 / 7</td><td class="r">467.3</td><td class="r">963</td><td class="r">0.14</td><td class="r">3</td></tr>
+<tr><td class="r">4,000</td><td class="c">7 / 7</td><td class="r">467.3</td><td class="r">963</td><td class="r">0.14</td><td class="r">3</td></tr>
+</tbody>
+</table>
+
+<p>All seven probes are answerable from a <strong>200-token</strong> window over a 27,362-token history — a 137× reduction — and the curve is flat from there. Above 1,200 the numbers stop changing entirely: the plan is complete, and additional budget is left unspent. The failure at 120 tokens is graceful and legible in the telemetry: demotions rise to 10 as the optimiser pushes nodes down the ladder before dropping any.</p>
+
+<h3>5.7&ensp;Result 4 — which mechanisms carry which probes?</h3>
+
+<table class="figure-wide">
+<caption><strong>Table 6.</strong> Ablation at <span class="m">B</span> = 1,200, 300 turns. One mechanism disabled per row.</caption>
+<thead><tr><th>Variant</th><th class="c">correct</th><th class="r">mean k</th><th>Probes that fail</th></tr></thead>
+<tbody>
+<tr class="total"><td>full runtime</td><td class="c">7 / 7</td><td class="r">467.3</td><td>—</td></tr>
+<tr><td>no supersession</td><td class="c">5 / 7</td><td class="r">629.9</td><td>corrected fact (mid-history); corrected fact (late)</td></tr>
+<tr><td>no escalation</td><td class="c">6 / 7</td><td class="r">452.6</td><td>detail buried in a long span</td></tr>
+<tr><td>L2 only (no ladder)</td><td class="c">5 / 7</td><td class="r">386.9</td><td>exact quote; detail buried in a long span</td></tr>
+<tr><td>no seed floor</td><td class="c">7 / 7</td><td class="r">649.0</td><td>— (costs 39% more tokens)</td></tr>
+<tr><td>no reference linking</td><td class="c">7 / 7</td><td class="r">467.3</td><td>— (no effect on this corpus)</td></tr>
+<tr><td>no graph expansion</td><td class="c">7 / 7</td><td class="r">252.1</td><td>— (and 46% <em>cheaper</em>)</td></tr>
+</tbody>
+</table>
+
+<p>Three mechanisms are load-bearing. Removing supersession costs two probes <em>and</em> 35% more tokens, because both sides of every correction stay live and compete for the window — the clearest demonstration we have that correction handling is what attacks context rot rather than merely tidying the store. Removing the ladder costs the two probes that need exact bytes. Removing escalation costs the buried-detail probe for a saving of 15 tokens per query.</p>
+
+<p>Two results are negative, and we report them as such. <strong>Reference linking</strong> — deriving dependency edges from value mentions — changes nothing on this corpus, because our justification probe is answerable from a single node whose own text contains the reason. <strong>Graph expansion</strong> is worse than useless here: disabling it keeps all seven probes and saves 215 tokens per query, 46% of the working set. Neither result shows the mechanisms are wrong; it shows our corpus does not contain a question that requires composing two nodes, which is precisely the question those mechanisms exist to answer. A benchmark that cannot distinguish a graph from a flat store has not tested the graph. Building a probe set that isolates multi-hop retrieval is the first item of future work, and until it exists the honest position is that expansion is a cost we have not yet justified.</p>
+
+<h3>5.8&ensp;The price of the memory runtime</h3>
+<p>Ingestion of the 300-turn corpus produces 301 spans, 298 state nodes, and 705 edges, and builds 35 summaries and 823 vectors, in 0.04 s. That cost is paid once and amortised over every subsequent query; it is not part of the per-turn token budget. Storage remains <span class="m">O(N)</span> and unbounded by design — the claim is bounded attention, not bounded storage.</p>
+
+<h2 id="s6">6&ensp;Threats to validity</h2>
+
+<p>We state these plainly because the results above are easy to over-read.</p>
+
+<p><strong>The corpus is synthetic.</strong> It was written to contain the failure modes the design targets, by the same people who designed it. It exercises correction, staleness, exact quoting, and detail buried by compression; it is not a sample of real agent traces, and its noise is stylistically uniform in a way real transcripts are not.</p>
+
+<p><strong>The instrument is not a language model.</strong> A line matcher cannot paraphrase or compose. This buys attribution — a wrong answer is always the runtime's fault — at the cost of external validity. In particular the baselines' correctness columns are <em>floors</em>: a competent model reading the full transcript would answer more of these probes than our matcher does. Reading Table 3 as "DCR is more accurate than long context" would be a misreading. The defensible claims are the token counts and the sliding window's structural misses.</p>
+
+<p><strong>No RLM comparison.</strong> We motivate the design as a layer above recursive slicing of context, but we do not implement or measure against a recursive-language-model system. Any claim that DCR is faster or cheaper than RLM is therefore unsupported by this paper.</p>
+
+<p><strong>One corpus, one probe set.</strong> Seven probes on one generator is enough to falsify a claim, not enough to establish a distribution. The ablation's two negative results are direct evidence of the probe set's limits.</p>
+
+<p><strong>Extraction is conservative and non-neural.</strong> The scanner proposes state only for unambiguous shapes. Prose-heavy material stays at L0 and is found by search instead. A model-driven extractor would find more state — and would introduce the failure mode this design most fears, a confidently cached wrong claim, which mandatory provenance mitigates but does not solve.</p>
+
+<p><strong>Token counts are estimated</strong> by a character heuristic rather than a real tokeniser, uniformly across all conditions. Ratios are therefore more trustworthy than absolute counts.</p>
+
+<p><strong>Retrieval is linear.</strong> The cost model requires sub-linear retrieval as one of its three conditions; the implementation satisfies the other two and not this one. The bounded-attention result stands, the end-to-end complexity claim does not.</p>
+
+<h2 id="s7">7&ensp;Open problems</h2>
+
+<p><strong>Defining sufficiency.</strong> <span class="m">sufficient(L, q)</span> has no clean definition. We route by query type and measure escalation, which is a proxy with a measurable error rate, not a theory. A learned router with escalation rate as its loss is the obvious next step.</p>
+
+<p><strong>Estimating utility.</strong> Our <span class="m">U(x)</span> is hand-weighted. Learning it from downstream answer quality is attractive and dangerous in equal measure: the failure mode of a learned utility is a window full of cheap material that scores well and answers nothing, and the telemetry that would catch it is exactly the escalation rate the router is already using.</p>
+
+<p><strong>Trusting extracted state.</strong> Node extraction is the point where a wrong fact enters with high confidence. Mandatory spans, confidence thresholds, and contradiction edges reduce the blast radius. What error rate is tolerable, and how it should be measured, is unresolved.</p>
+
+<p><strong>Sub-linear retrieval over state.</strong> An approximate-nearest-neighbour index behind the vector interface would close the gap identified in §5.5. The interesting version of the question is whether graph structure can replace part of the vector search rather than merely accelerating it.</p>
+
+<p><strong>Multi-hop evaluation.</strong> The probe set needs questions whose answers exist only as a composition of two nodes, so that graph expansion and reference linking can be validated or discarded on evidence.</p>
+
+<p><strong>Bounded revalidation.</strong> Cascades are bounded and the tail is deferred, but we do not characterise the staleness that deferral admits, nor the cost of rebuilding a workspace from the store — the invariant that the working set is disposable is only useful if rebuilding is cheap.</p>
+
+<h2 id="s8">8&ensp;Conclusion</h2>
+
+<p>Context rot is usually treated as a prompt-engineering problem, addressed by summarising old turns when someone remembers to. We have argued it is a systems problem with a known shape: unbounded external state, an explicit budget on what may be attended to, and an optimiser that decides which representation of which fact is worth its tokens this turn. Framed that way, most of the machinery already exists in database systems — provenance, view maintenance, snapshot isolation, cache admission — and can be imported rather than reinvented.</p>
+
+<p>The measurements support a narrow, useful claim: a working set of a few hundred tokens can answer the same questions as a 27,000-token transcript, and stays the same size as that transcript grows 33× larger. They also show where the design is not yet earned — retrieval is still linear, and two of our mechanisms are not validated by our own benchmark. We would rather publish that than a table with no negative rows.</p>
+
+<h2 id="s9">Availability</h2>
+<p>The specification wiki, the Rust implementation, and every experiment in this paper are available at <span class="tt">github.com/s-b-repo/subnext</span>. All results reproduce offline with no API key and no network access:</p>
+<pre class="snippet">cargo run --release -- bench                      # Table 3
+cargo run --release -- bench --scaling            # Table 4, Figure 2
+cargo run --release -- bench --sweep              # Table 5
+cargo run --release -- bench --ablate             # Table 6
+cargo test                                        # 71 tests</pre>
+
+<h2 id="refs">References</h2>
+<ol class="refs">
+<li>A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez, Ł. Kaiser, and I. Polosukhin. Attention is all you need. <em>Advances in Neural Information Processing Systems</em>, 2017.</li>
+<li>N. F. Liu, K. Lin, J. Hewitt, A. Paranjape, M. Bevilacqua, F. Petroni, and P. Liang. Lost in the middle: how language models use long contexts. <em>Transactions of the ACL</em>, 2024.</li>
+<li>P. Lewis, E. Perez, A. Piktus, F. Petroni, V. Karpukhin, N. Goyal, H. Küttler, M. Lewis, W. Yih, T. Rocktäschel, S. Riedel, and D. Kiela. Retrieval-augmented generation for knowledge-intensive NLP tasks. <em>Advances in Neural Information Processing Systems</em>, 2020.</li>
+<li>I. Beltagy, M. E. Peters, and A. Cohan. Longformer: the long-document transformer. <em>arXiv:2004.05150</em>, 2020.</li>
+<li>T. Dao, D. Y. Fu, S. Ermon, A. Rudra, and C. Ré. FlashAttention: fast and memory-efficient exact attention with IO-awareness. <em>Advances in Neural Information Processing Systems</em>, 2022.</li>
+<li>S. Robertson and H. Zaragoza. The probabilistic relevance framework: BM25 and beyond. <em>Foundations and Trends in Information Retrieval</em>, 3(4), 2009.</li>
+<li>V. Karpukhin, B. Oğuz, S. Min, P. Lewis, L. Wu, S. Edunov, D. Chen, and W. Yih. Dense passage retrieval for open-domain question answering. <em>EMNLP</em>, 2020.</li>
+<li>J. S. Park, J. C. O'Brien, C. J. Cai, M. R. Morris, P. Liang, and M. S. Bernstein. Generative agents: interactive simulacra of human behavior. <em>UIST</em>, 2023.</li>
+<li>C. Packer, S. Wooders, K. Lin, V. Fang, S. G. Patil, I. Stoica, and J. E. Gonzalez. MemGPT: towards LLMs as operating systems. <em>arXiv:2310.08560</em>, 2023.</li>
+<li>P. Buneman, S. Khanna, and W. C. Tan. Why and where: a characterization of data provenance. <em>International Conference on Database Theory</em>, 2001.</li>
+<li>A. Gupta and I. S. Mumick. Maintenance of materialized views: problems, techniques, and applications. <em>IEEE Data Engineering Bulletin</em>, 18(2), 1995.</li>
+<li>H. Berenson, P. Bernstein, J. Gray, J. Melton, E. O'Neil, and P. O'Neil. A critique of ANSI SQL isolation levels. <em>ACM SIGMOD</em>, 1995.</li>
+<li>H. Kellerer, U. Pferschy, and D. Pisinger. <em>Knapsack Problems</em>. Springer, 2004.</li>
+<li>J. E. Smith. A study of branch prediction strategies. <em>International Symposium on Computer Architecture</em>, 1981.</li>
+</ol>
+
+<div class="footnotes">
+<p><span class="fn">1</span> The recursive-language-model framing used here is taken from the Dynamic Context Runtime specification wiki (<span class="tt">github.com/s-b-repo/subnext</span>), which describes the primitive as treating context as a variable in a REPL that the model can slice and recursively query. This paper responds to that framing; it does not evaluate against any particular implementation of it.</p>
+</div>

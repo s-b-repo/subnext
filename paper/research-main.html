@@ -1,0 +1,112 @@
+  <section class="page-hero">
+    <div class="wrap">
+      <p class="kicker reveal">// research</p>
+      <h1 class="reveal">Research &amp; <span class="hl">Technical Reports.</span></h1>
+      <p class="page-sub reveal">Systems work that we can show our working for. Each report ships with the source that produced its numbers, and every table in it reproduces offline on your own machine &mdash; including the rows where the result went against us.</p>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="latest-h">
+    <div class="wrap">
+      <header class="section-head reveal">
+        <p class="kicker">// latest</p>
+        <h2 id="latest-h">Current Report</h2>
+      </header>
+
+      <article class="lead-report reveal">
+        <div class="rep-meta">
+          <span class="rep-id">DCR-TR-2026-01</span>
+          <span>20 August 2026</span>
+          <span class="rep-tag">LLM systems</span>
+          <span class="rep-tag">9 pages</span>
+        </div>
+        <h3>Dynamic Context Runtime: Bounded Attention over Unbounded History</h3>
+        <p class="rep-sub">Language models degrade as stale and superseded material piles up in their context. Making the window bigger does not fix it. This report describes a runtime that keeps history unbounded and attention bounded &mdash; storing everything as immutable spans and a typed provenance graph, then assembling a small working set each turn by solving a knapsack under an explicit token budget. It includes a zero-dependency Rust implementation and an ablation that names which mechanisms are actually carrying the result.</p>
+        <div class="rep-numbers">
+          <div><b>467</b>tokens per query</div>
+          <div><b>59&times;</b>less than full history</div>
+          <div><b>7 / 7</b>probes answered</div>
+          <div><b>33&times;</b>history growth, flat cost</div>
+        </div>
+        <div class="rep-actions">
+          <a class="rep-dl" href="papers/dcr-bounded-attention.pdf" download>Download PDF <span aria-hidden="true">&darr;</span></a>
+          <a class="rep-ghost" href="research-dcr-bounded-attention.html">Read in browser <span aria-hidden="true">&rarr;</span></a>
+          <a class="rep-ghost" href="https://github.com/s-b-repo/subnext">Source &amp; experiments <span aria-hidden="true">&rarr;</span></a>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section class="section section-alt" aria-labelledby="index-h">
+    <div class="wrap">
+      <header class="section-head reveal">
+        <p class="kicker">// index</p>
+        <h2 id="index-h">All Reports</h2>
+      </header>
+
+      <div class="rep-list reveal">
+        <article class="rep-row">
+          <div>
+            <div class="rep-meta">
+              <span class="rep-id">DCR-TR-2026-01</span>
+              <span>Aug 2026</span>
+              <span class="rep-tag">LLM systems</span>
+            </div>
+            <h3>Dynamic Context Runtime: Bounded Attention over Unbounded History</h3>
+            <p>A representation ladder, a provenance graph, and a budgeted context planner. All seven evaluation probes answered from a 200-token window over a 27,362-token transcript, with the working set flat across a 33&times; growth in history.</p>
+          </div>
+          <div class="rep-row-links">
+            <a href="research-dcr-bounded-attention.html">Read &rarr;</a>
+            <a href="papers/dcr-bounded-attention.pdf">PDF &darr;</a>
+            <a href="https://github.com/s-b-repo/subnext">Source &rarr;</a>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="standards-h">
+    <div class="wrap">
+      <header class="section-head reveal">
+        <p class="kicker">// how we publish</p>
+        <h2 id="standards-h">What a report from us contains</h2>
+      </header>
+
+      <div class="standards reveal">
+        <article class="card">
+          <span class="num">01</span>
+          <h3>Numbers you can re-run</h3>
+          <p>Every table and figure lists the command that produced it. The experiments run offline with no API key and no network, so a reader can reproduce or refute them in minutes rather than trusting a screenshot.</p>
+        </article>
+        <article class="card">
+          <span class="num">02</span>
+          <h3>The source, not a description of it</h3>
+          <p>The implementation behind each report is released. A claim about a system that nobody else can run is marketing, and we would rather be checked than believed.</p>
+        </article>
+        <article class="card">
+          <span class="num">03</span>
+          <h3>Negative results kept in</h3>
+          <p>Ablations that show a mechanism earning nothing stay in the paper. A results table with no losing rows usually means the experiment was designed after the conclusion.</p>
+        </article>
+        <article class="card">
+          <span class="num">04</span>
+          <h3>Limits stated in the paper</h3>
+          <p>Each report carries an explicit threats-to-validity section saying what its evidence cannot support &mdash; synthetic data, missing comparisons, measurement shortcuts. The caveats are not in the footnotes.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section section-alt" aria-labelledby="cta-h">
+    <div class="wrap">
+      <header class="section-head reveal" style="max-width:52ch">
+        <p class="kicker">// collaboration</p>
+        <h2 id="cta-h">Working on something adjacent?</h2>
+        <p class="page-sub">If you are building on this work, found a flaw in it, or want research done against your own systems, get in touch. Critique is more useful to us than citation.</p>
+      </header>
+      <div class="rep-actions reveal">
+        <a class="rep-dl" href="contact.html">Get in touch <span aria-hidden="true">&rarr;</span></a>
+        <a class="rep-ghost" href="services.html">Services <span aria-hidden="true">&rarr;</span></a>
+      </div>
+    </div>
+  </section>

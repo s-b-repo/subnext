@@ -1,15 +1,15 @@
 # Reference Implementation
 
-`dcr/` in this repository is a working implementation of the specification on
-these pages. Pure Python, standard library only, runs offline. Its purpose is to
-make the design **falsifiable**: every claim on these pages that could be wrong
-is either enforced by code or measured by the bundled benchmark.
+`src/` in this repository is a working implementation of the specification on
+these pages. Rust, zero dependencies, runs offline. Its purpose is to make the
+design **falsifiable**: every claim on these pages that could be wrong is either
+enforced by code or measured by the bundled benchmark.
 
 ```bash
-python -m dcr demo                          # one task through all four levels
-python -m dcr bench                         # DCR vs full context vs sliding window
-python -m dcr --budget 800 bench --scaling  # does k stay flat while N grows?
-python -m unittest discover -s tests
+cargo run --release -- demo                            # one task through all four levels
+cargo run --release -- bench                           # DCR vs full context vs sliding window
+cargo run --release -- bench --scaling --budget 800    # does k stay flat while N grows?
+cargo test
 ```
 
 ## What the code enforces that prose cannot
@@ -32,8 +32,8 @@ tokens per resolved query, audit-path completeness, demotions and budget
 overflows.
 
 On a 300-turn synthetic incident transcript (27k tokens of history,
-`B_attention` = 1200), attention cost is 457 tokens per query — 60x less than
-the full history — and stays flat (418 → 412 tokens) while history grows 33x to
+`B_attention` = 1200), attention cost is 467 tokens per query — 59x less than
+the full history — and stays flat (422 → 419 tokens) while history grows 33x to
 283k tokens.
 
 ## Where the implementation had to decide something the spec left open

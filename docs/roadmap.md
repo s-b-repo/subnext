@@ -1,7 +1,7 @@
 # Roadmap
 
 Each phase's deliverable is a written specification. A reference implementation
-of the specified behaviour now lives in `dcr/` — see
+of the specified behaviour now lives in `src/` — see
 [implementation](implementation.md) — so each phase can be checked against
 running code rather than only argued about.
 

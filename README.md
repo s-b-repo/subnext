@@ -93,9 +93,29 @@ Measured on a 300-turn synthetic incident transcript (27k tokens of history,
 history — with `k` staying flat as history grows 33x.**
 Full numbers, scaling table, and caveats: [RESULTS.md](RESULTS.md).
 
+## Paper
+
+[**Dynamic Context Runtime: Bounded Attention over Unbounded History**](paper/dcr-bounded-attention.pdf)
+(DCR-TR-2026-01) — the design, the implementation, and four measured results,
+including an ablation that names which mechanisms carry which probes and reports
+two that carry nothing. Also readable
+[in the browser](https://cybersec.org.za/research-dcr-bounded-attention.html).
+
+Every table in it reproduces offline:
+
+```bash
+cargo run --release -- bench            # context-rot comparison
+cargo run --release -- bench --scaling  # does k stay flat as history grows?
+cargo run --release -- bench --sweep    # correctness against B_attention
+cargo run --release -- bench --ablate   # which mechanism carries which probe?
+```
+
+The PDF and the web version are both generated from `paper/paper.frag.html` by
+`python3 paper/build.py`, so the prose cannot drift between them.
+
 ## Status
 
 Specification plus reference implementation. Contributions are docs, critiques,
 worked examples, and code — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-License: [MIT](LICENSE) for the code in `dcr/`, `tests/`, and `examples/`; [CC BY 4.0](LICENSE-DOCS) for the specification in `docs/`.
+License: [MIT](LICENSE) for the code in `src/`, `dcr/`, `tests/`, and `examples/`; [CC BY 4.0](LICENSE-DOCS) for the specification in `docs/` and the technical report in `paper/`.

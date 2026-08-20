@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en-ZA">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+<!-- GitHub Pages cannot set response headers; these are the meta equivalents. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self' https://formspree.io https://api.web3forms.com https://cloudflareinsights.com; form-action 'self' https://formspree.io https://api.web3forms.com; base-uri 'none'; object-src 'none'; upgrade-insecure-requests" />
+<meta name="referrer" content="strict-origin-when-cross-origin" />
+
+<title>{{TITLE}} | Cyber Sec Research</title>
+<meta name="description" content="{{DESCRIPTION}}" />
+<meta name="keywords" content="context rot, long context, retrieval augmented generation, agent memory, attention budget, provenance, Rust, LLM systems" />
+<meta name="robots" content="index, follow, max-image-preview:large" />
+<link rel="canonical" href="https://cybersec.org.za/{{SLUG}}.html" />
+<meta name="theme-color" content="#000000" />
+
+<meta property="og:type" content="article" />
+<meta property="og:site_name" content="Cyber Sec" />
+<meta property="og:title" content="{{TITLE}}" />
+<meta property="og:description" content="{{DESCRIPTION}}" />
+<meta property="og:url" content="https://cybersec.org.za/{{SLUG}}.html" />
+<meta property="og:image" content="https://cybersec.org.za/assets/og-image.png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:locale" content="en_ZA" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="{{TITLE}}" />
+<meta name="twitter:description" content="{{DESCRIPTION}}" />
+<meta name="twitter:image" content="https://cybersec.org.za/assets/og-image.png" />
+
+<link rel="icon" type="image/png" sizes="256x256" href="assets/favicon.png" />
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png" />
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png" />
+<link rel="stylesheet" href="assets/styles.css?v=80cdc3d1" />
+<style>{{PAPERCSS}}</style>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "ScholarlyArticle",
+      "@id": "https://cybersec.org.za/{{SLUG}}.html#article",
+      "headline": "{{TITLE}}",
+      "description": "{{DESCRIPTION}}",
+      "datePublished": "{{ISODATE}}",
+      "inLanguage": "en",
+      "keywords": ["context rot","long context","agent memory","retrieval","attention budget","provenance","Rust"],
+      "author": { "@type": "Person", "name": "Stephan Botes", "url": "https://cybersec.org.za/" },
+      "publisher": { "@id": "https://cybersec.org.za/#org" },
+      "isPartOf": { "@type": "PublicationIssue", "name": "Cyber Sec Technical Reports" },
+      "identifier": "{{REPORTID}}",
+      "encoding": { "@type": "MediaObject", "encodingFormat": "application/pdf", "contentUrl": "https://cybersec.org.za/papers/{{PDF}}" },
+      "mainEntityOfPage": "https://cybersec.org.za/{{SLUG}}.html"
+    },
+    {
+      "@type": "Organization",
+      "@id": "https://cybersec.org.za/#org",
+      "name": "Cyber Sec",
+      "url": "https://cybersec.org.za/"
+    }
+  ]
+}
+</script>
+</head>
+
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<div class="grain" aria-hidden="true"></div>
+<div class="bg-grid" aria-hidden="true"></div>
+
+<header class="site-header" id="top">
+  <div class="wrap header-inner">
+    <a class="brand" href="index.html" aria-label="Cyber Sec, home">
+      <span class="brand-mark" aria-hidden="true">
+        <canvas id="globe-canvas" width="60" height="60" aria-hidden="true"></canvas>
+      </span>
+      <span class="brand-text">CYBER<i>SEC</i></span>
+    </a>
+
+    <nav class="nav" aria-label="Primary">
+      <a href="index.html">Home</a>
+      <a href="services.html">Services</a>
+      <a href="store.html">Store</a>
+      <a href="about.html">About</a>
+      <a href="resources.html">Resources</a>
+      <a href="research.html" aria-current="page">Research</a>
+      <a href="facts.html">Facts</a>
+      <a class="nav-cta" href="contact.html">Get in touch</a>
+    </nav>
+
+    <button class="nav-toggle" aria-label="Open menu" aria-expanded="false" aria-controls="mobile-nav">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+  <div class="mobile-nav" id="mobile-nav" hidden>
+    <a href="index.html">Home</a>
+    <a href="services.html">Services</a>
+    <a href="store.html">Store</a>
+    <a href="about.html">About</a>
+    <a href="resources.html">Resources</a>
+    <a href="research.html" aria-current="page">Research</a>
+    <a href="facts.html">Facts</a>
+    <a href="contact.html">Get in touch</a>
+  </div>
+</header>
+
+<main id="main">
+{{MAIN}}
+</main>
+
+<footer class="site-footer">
+  <div class="wrap footer-inner">
+    <div class="footer-brand">
+      <span class="brand-text">CYBER<i>SEC</i></span>
+       <p>Custom pentesting tooling &middot; vulnerability research &middot; code &amp; OSS audits &middot; vendor testing &middot; detection engineering. Remote &amp; on-site.</p>
+    </div>
+    <nav class="footer-nav" aria-label="Footer">
+      <a href="index.html">Home</a>
+      <a href="services.html">Services</a>
+      <a href="store.html">Store</a>
+      <a href="about.html">About</a>
+      <a href="resources.html">Resources</a>
+      <a href="research.html">Research</a>
+      <a href="facts.html">Facts</a>
+      <a href="contact.html">Contact</a>
+    </nav>
+    <div class="footer-meta">
+      <a href="mailto:stephanbotesIT@proton.me">stephanbotesIT@proton.me</a>
+      <a href="/.well-known/security.txt">security.txt</a>
+      <span>&copy; <span id="year">2026</span> Cyber Sec. Authorized testing only.</span>
+    </div>
+  </div>
+</footer>
+
+<a class="to-top" href="#top" aria-label="Back to top">&uarr;</a>
+
+<script src="assets/main.js?v=e9de9559" defer></script>
+</body>
+</html>

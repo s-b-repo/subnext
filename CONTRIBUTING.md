@@ -1,6 +1,6 @@
 # Contributing
 
-This repo is a specification wiki (`docs/`) plus a reference implementation of it (`dcr/`). The
+This repo is a specification wiki (`docs/`) plus a reference implementation of it (`src/`). The
 wiki is the design; the code exists to make the design falsifiable. Changes to either are welcome,
 but they answer to different standards — see the rules below.
 
@@ -12,14 +12,14 @@ but they answer to different standards — see the rules below.
   breaks.
 - **Prior art.** Papers or systems that already do part of this, with a note on what they solved.
 - **Clarity fixes.** Wrong, vague, or hand-wavy prose.
-- **Code that closes a gap between the wiki and `dcr/`**, or a benchmark probe that the current
+- **Code that closes a gap between the wiki and `src/`**, or a benchmark probe that the current
   implementation fails. A failing probe is worth more than a passing feature.
 
 ## Rules
 
 1. **No unsupported performance claims.** `O(k + r)` is a design target. Don't write it as a
    measured result. If you claim a speedup, cite a benchmark.
-2. **Code changes carry tests.** `python -m unittest discover -s tests` must pass, and anything
+2. **Code changes carry tests.** `cargo test` must pass, and anything
    the wiki states as an invariant ("nothing is deleted", "a stale node never reaches the model")
    belongs in a test rather than a comment.
 3. **Don't let the code and the wiki drift.** If an implementation choice resolves something the

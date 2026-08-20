@@ -1,0 +1,128 @@
+/* Paper body on the site's dark theme. The print stylesheet is the sibling of
+   this file; both render the same fragment, so class names must match. */
+
+.paper-body{max-width:74ch;margin-inline:auto}
+.paper-body h2{
+  font-family:var(--font-display);font-size:clamp(1.25rem,2.4vw,1.6rem);
+  margin:2.4rem 0 .7rem;padding-bottom:.4rem;border-bottom:1px solid var(--line-soft);
+  color:#dbe9ff;letter-spacing:.005em;scroll-margin-top:90px;
+}
+.paper-body h3{
+  font-family:var(--font-display);font-size:1.06rem;font-weight:600;
+  margin:1.7rem 0 .5rem;color:#b9d2f2;scroll-margin-top:90px;
+}
+/* The site sets article body text to --muted (AA at 5.3:1). That is right for a
+   700-word article and tiring for a 6,000-word paper, so the paper body steps up
+   to --text (~11:1) and keeps a slightly wider measure. */
+.paper-body p{margin:0 0 1rem;color:var(--text);font-size:1.02rem;line-height:1.75;max-width:68ch}
+.paper-body ol,.paper-body ul{
+  margin:0 0 1.1rem;padding-left:1.35rem;color:var(--text);
+  font-size:1.02rem;line-height:1.75;max-width:68ch;
+}
+.paper-body li{margin-bottom:.5rem}
+.paper-body li::marker{color:var(--acc)}
+
+.paper-abstract{
+  background:var(--surface);border:1px solid var(--line-soft);border-left:3px solid var(--acc);
+  border-radius:var(--radius);padding:1.15rem 1.35rem;margin:0 0 2rem;
+}
+.paper-abstract h2{
+  margin:0 0 .5rem;padding:0;border:0;font-family:var(--font-mono);
+  font-size:.74rem;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);
+}
+.paper-abstract p{margin:0 0 .7rem;color:#cddff5}
+.paper-abstract p:last-child{margin-bottom:0}
+
+.m{font-family:var(--font-mono);font-size:.92em;font-variant-ligatures:none}
+.tt{
+  font-family:var(--font-mono);font-size:.85em;font-variant-ligatures:none;
+  background:rgba(20,90,220,.12);border:1px solid var(--line-soft);
+  padding:.05em .35em;border-radius:4px;color:#a9c8ee;white-space:nowrap;
+}
+.cite{font-size:.86em;color:var(--acc);font-weight:600;white-space:nowrap}
+.fn{font-size:.7em;vertical-align:super;color:var(--acc);font-weight:700;line-height:0}
+
+.eq{
+  font-family:var(--font-mono);font-size:.9rem;text-align:center;
+  background:var(--surface);border:1px solid var(--line-soft);border-radius:var(--radius);
+  padding:.9rem;margin:1.1rem 0;color:#cddff5;overflow-x:auto;
+}
+pre.snippet{
+  font-family:var(--font-mono);font-size:.82rem;line-height:1.55;font-variant-ligatures:none;
+  background:var(--surface-2);border:1px solid var(--line-soft);border-left:3px solid var(--acc-deep);
+  border-radius:var(--radius);padding:.9rem 1.1rem;margin:1.1rem 0;
+  overflow-x:auto;color:#bcd6f5;white-space:pre;
+}
+
+/* tables */
+.paper-body .table-scroll{overflow-x:auto;margin:1.1rem 0 1.6rem;-webkit-overflow-scrolling:touch}
+.paper-body table{border-collapse:collapse;width:100%;font-size:.86rem;min-width:520px}
+.paper-body caption{
+  caption-side:top;text-align:left;color:var(--muted);font-size:.86rem;
+  padding-bottom:.6rem;line-height:1.5;
+}
+.paper-body th{
+  font-family:var(--font-mono);font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--faint);text-align:left;padding:.5rem .7rem .5rem 0;
+  border-bottom:1px solid var(--line);vertical-align:bottom;font-weight:600;
+}
+.paper-body td{
+  padding:.5rem .7rem .5rem 0;border-bottom:1px solid var(--line-soft);vertical-align:top;
+}
+.paper-body tr.total td{background:rgba(20,90,220,.08);font-weight:600;color:#dbe9ff}
+.paper-body .c{text-align:center}
+.paper-body .r{text-align:right;font-variant-numeric:tabular-nums}
+.paper-body th.c{text-align:center}
+.paper-body th.r{text-align:right}
+.ok{color:#43d17f;font-weight:600}
+.miss{color:var(--warn);font-weight:600}
+
+/* figures sit on a light plate — they are drawn for print, and inverting a
+   diagram is a good way to make it unreadable in both themes */
+.paper-body figure{margin:1.6rem 0 1.8rem}
+.paper-body figure svg{
+  width:100%;height:auto;display:block;background:#fff;
+  border:1px solid var(--line-soft);border-radius:var(--radius);padding:.6rem;
+}
+.paper-body figcaption{color:var(--muted);font-size:.86rem;line-height:1.55;margin-top:.7rem}
+
+ol.refs{font-size:.88rem;color:var(--muted)}
+ol.refs li{margin-bottom:.55rem;line-height:1.55}
+ol.refs em{color:#a9c8ee;font-style:italic}
+
+.footnotes{
+  border-top:1px solid var(--line-soft);margin-top:2rem;padding-top:1rem;
+  font-size:.84rem;color:var(--muted);
+}
+.footnotes p{margin:0}
+
+/* download strip */
+.paper-actions{
+  display:flex;flex-wrap:wrap;gap:.8rem;align-items:center;
+  margin:1.4rem 0 0;
+}
+.paper-dl{
+  display:inline-flex;align-items:center;gap:.55rem;
+  font-family:var(--font-mono);font-size:.82rem;letter-spacing:.04em;
+  background:var(--acc);color:#fff;border-radius:10px;padding:.7rem 1.1rem;
+  border:1px solid var(--acc);transition:background .18s ease,transform .18s ease;
+}
+.paper-dl:hover{background:var(--acc-deep);transform:translateY(-1px)}
+.paper-alt{
+  display:inline-flex;align-items:center;gap:.5rem;
+  font-family:var(--font-mono);font-size:.82rem;color:var(--text);
+  border:1px solid var(--line);border-radius:10px;padding:.7rem 1.1rem;
+  transition:border-color .18s ease,color .18s ease;
+}
+.paper-alt:hover{border-color:var(--acc);color:#dbe9ff}
+.paper-facts{
+  display:flex;flex-wrap:wrap;gap:1.4rem;margin:1.5rem 0 0;
+  font-family:var(--font-mono);font-size:.74rem;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--faint);
+}
+.paper-facts b{display:block;font-size:.95rem;letter-spacing:0;text-transform:none;color:#cddff5;margin-top:.15rem}
+
+@media (max-width:640px){
+  .paper-body table{font-size:.8rem}
+  .paper-facts{gap:1rem}
+}
