@@ -69,13 +69,15 @@ the tool was fixed: three of its four regexes never matched anything. The live
 one looks for a struct that derives `Debug` and holds a field whose name
 contains `token` — a credential printed by `{:?}`.
 
-All six current hits are token *counts*, not secrets: `Allocation.tokens`,
-`ActiveContext.tokens`, `RelevancePlanner.token_estimator`, `Answer.tokens`,
-`RebuildReport.tokens`, `Speculator.tokens`, and the three in `telemetry.rs`
-(`Turn.tokens`, `Telemetry.history_tokens`, `Report.tokens_per_query_max`).
-This crate counts tokens in the language-model sense on nearly every struct, so
-the pattern will keep firing here and the count is expected to stay at six or
-rise.
+All six are token *counts*, not secrets — `Allocation` (`budget.rs:82`),
+`ActiveContext` (`planner.rs:170`), `Answer` (`runtime.rs:39`), `RebuildReport`
+(`runtime.rs:1137`), `Turn` (`telemetry.rs:15`) and `Report`
+(`telemetry.rs:105`). This crate counts tokens in the language-model sense on
+nearly every struct that crosses the planner, so the pattern will keep firing
+here and the count will rise rather than fall. Confirm the list with
+`scripts/audit-bad-patterns.sh --section P --show` rather than by grepping for
+token-named fields: more structs have one than the section reports, because the
+pattern requires the field to sit inside the struct that derives `Debug`.
 
 **The pattern is still worth its false positives.** Before the fix it was dead,
 and while it was dead `InsecureDevSigner` shipped with a derived `Debug` over
