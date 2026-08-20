@@ -23,9 +23,14 @@ nav:
       - Relevance Planner: architecture/relevance-planner.md
       - Decision Policy: architecture/decision-policy.md
       - Provenance: architecture/provenance.md
+      - Context integrity: architecture/context-integrity.md
+      - Failure modes: architecture/failure-modes.md
+      - Workspace rebuild: architecture/workspace-rebuild.md
   - Implementation: implementation.md
   - Comparison: comparison.md
+  - Alternatives: alternatives.md
   - Open questions: open-questions.md
+  - Audit (Aug 2026): audit-2026-08.md
   - Roadmap: roadmap.md
   - FAQ: faq.md
   - Glossary: glossary.md

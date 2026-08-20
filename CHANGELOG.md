@@ -35,6 +35,30 @@ benchmark suite whose results are reproducible offline with no API key.
   chain, with `verify`, `checkpoint`, and `quarantine` commands.
 - **Bit-rot detection and repair** (`scrub`): `scrub [--repair]` detects
   corruption and repairs only from a replica that verifies.
+- **SHA-256** (`hash`), implemented in-tree and checked against the published
+  FIPS 180-4 vectors rather than against itself. The one cryptographic
+  primitive the crate owns, because a hash is the one that can be verified
+  against known output.
+- **Merkle tree** (`merkle`): root and `log n` inclusion proofs over the object
+  set, with domain-separated leaves and interior nodes, and odd nodes promoted
+  rather than duplicated (the CVE-2012-2459 shape).
+- **Context gateway** (`trust`): the five admission conditions — integrity,
+  signature and provenance, generation, schema, policy — enforced in one place.
+  `Signer`, `Verifier` and `Aead` are traits with **no bundled implementation**;
+  hand-rolling Ed25519 or an AEAD would trade a dependency for a liability.
+- **Key separation** as a `KeyRole` enum, recorded in the manifest even while
+  signing is unplugged.
+- **Trust labels** carried separately from verification state, so a correctly
+  signed object from a low-trust source is still refused.
+- **Anti-rollback**: monotonic generations plus a high-water mark checked on
+  open, with a guard digest so truncation is visible.
+- **Canonical JSON** (`Json::to_canonical_string`): sorted keys, deduplicated
+  keys, non-finite numbers as `null`. A digest has to be a property of the
+  value, not of how the value was built.
+- **Evidence hierarchy**: `Origin` (observed / externally sourced / computed /
+  inferred / hypothetical) on every node, rendered whenever it is not
+  `observed`, plus `Status::Contradicted` and `Status::Unresolved` and the
+  `is_live()` predicate that replaces scattered `== Fresh` checks.
 
 #### Benchmarks
 
@@ -80,6 +104,21 @@ Every table in the report names the command that produced it.
   read coverage does not — the blind region does.** This is the dual cost of
   bounded attention that no probe-based table can show, because a span whose
   specifics silently governed an answer can never appear in a probe.
+
+- **`bench --baselines`**: two tables. The standard corpus against RAG,
+  summarize-all and recursive map-reduce; then a **discriminating corpus** built
+  so similarity is misleading and refusing is sometimes correct. DCR scores 2/5
+  on the second and loses to recursive map-reduce.
+- **`bench --rebuild`**: cold and warm workspace reassembly, so "destroy and
+  rebuild at any time" is a measurement rather than a slogan.
+- **`bench --tamper`**: corrupts an object, rewrites a historical checkpoint,
+  and attempts a rollback, asserting each is caught.
+- **Refusal probes** (`Probe::refuse`): probes passed by *declining*. A suite
+  made only of recall probes rewards answering everything confidently, which is
+  the failure the design is aimed at.
+- **Context-scored probes** (`Probe::assembled`): for joins the harness's
+  line-matcher cannot perform, the assembled window is scored instead of the
+  answer — uniformly, for every column.
 
 #### Documents
 
@@ -127,6 +166,26 @@ Every table in the report names the command that produced it.
   spans "read" when the model saw one summarised line. L0-admitted nodes carry
   one span, so L0 is the honest measure.
 
+- **The checkpoint chain covered only part of a checkpoint.** It hashed the
+  Merkle root and the delta, leaving `timestamp`, `object_count` and
+  `policy_hash` editable without breaking anything. Found by `bench --tamper`
+  the first time it ran. The chain now covers the whole checkpoint body.
+- **The chain reconstructed `schema` from a constant**, so the value on disk
+  never entered the digest and could be edited for free. Found by
+  `every_checkpoint_field_is_covered_by_the_chain`, which walks every field
+  rather than the one someone thought to check. The parsed value is now carried
+  into the digest *and* an unknown schema is refused.
+- **Objects were re-addressed on every commit.** The generation sat inside the
+  hashed body, so unchanged material got a new address each write and the store
+  grew by its whole size per commit (20 → 40 → 60 objects across three queries).
+  Generation moved to the sidecar; an address now depends on content alone.
+- **Read counters minted a new copy of every admitted node per query.** Moved to
+  one `usage` object per generation. An append-only store must grow with
+  knowledge, not with reads.
+- **`bench --rebuild` measured the wrong thing.** It timed a plan *after*
+  `rebuild_workspace`, which had already replanned, so "cold" and "warm" were
+  both warm and identical. The real gap is 7×.
+
 ### Documentation — claims tightened
 
 Four claims in the report were true but stated more strongly than the evidence
@@ -153,6 +212,19 @@ implementation actually reaches.
 - **§7 now discusses auditing the unread region**, and a footnote credits the
   reviewer whose objections produced §5.9 and §5.10.
 
+- **`provenance.md` overclaimed on conflict handling.** It said `contradicts`
+  edges keep both sides "rather than inherit whichever summary won". That holds
+  only when one side is explicitly corrective; two plain disagreeing claims are
+  resolved by ingest order and no marker reaches the window. The rule is now
+  stated as a table, and `bench --baselines` prices the consequence as its own
+  row.
+- **`RESULTS.md` still documented the Python build** after the Rust port
+  (`python -m dcr`, `index.py`, a stale test count). Regenerated from the Rust
+  build, and every table re-measured.
+- **Open questions #5, #9 and #10 were listed as unresolved** although all three
+  were answered in code. Moved to a *Resolved* section with pointers, and the
+  survivors renumbered.
+
 ### Tests
 
 140 Rust tests across 15 binaries; 78 Python tests. They encode the invariants as
@@ -174,18 +246,34 @@ Two are worth naming because they guard against a specific past failure:
 Tracked in [`TODO.md`](TODO.md), stated here because they bound what the numbers
 mean.
 
-- **Retrieval is not sub-linear.** Query latency is 5.9ms → 77.5ms across a 33×
+- **Retrieval is not sub-linear.** Query latency is 0.6ms → 16.2ms across a 33×
   history growth, because the vector search is a linear scan over state nodes.
   Attention is flat; retrieval is not. The cost model needs an ANN index before
   the `O(k + r)` claim holds at scale.
 - **Graph expansion may not be earning its place.** Turning it off makes the
-  runtime 46% cheaper (467.3 → 252.1 tokens) and loses nothing on this corpus.
+  runtime 43% cheaper (413.6 → 235.3 mean k) and loses nothing on this corpus.
   Reference linking has no effect at all. Either the corpus is too easy or the
   mechanisms are not load-bearing, and the current corpus cannot separate those.
 - **Nothing is benchmarked under concurrency.** Every number comes from a
   single-threaded read path against a static store.
-- **The extractor's general case is untouched.** `"X has moved to Y"`,
-  `"X was replaced by Y"`, and `"we switched X to Y"` will still extract badly.
+- **The extractor's general case is untouched.** `"we switched X to Y"` and
+  subject-after-verb phrasings still extract badly; a sentence like
+  `"The rollout outcome for release R-88 is reverted"` produced no node at all
+  until it was reworded.
+- **A derived figure stated as prose is never invalidated.** Invalidation tracks
+  derivations the runtime *computed*; `"the incident cost estimate is 2160 USD,
+  computed from …"` is served unchanged after one of its inputs is corrected.
+  Measured by the `stale derivation` probe, which DCR fails.
+- **A dense window makes near-miss answers easy to reach for.** Asked for a fact
+  history never states, DCR serves the adjacent line where full context and RAG
+  decline. Measured by the `absent fact` probe, which DCR fails.
+- **Repetition inflates confidence past stated fact.** Noise sentences repeat, so
+  corroboration lifts them to `conf=0.97` while a fact stated once sits at
+  `0.80`, and the planner prefers the noise. Visible in any adversarial corpus
+  whose vocabulary overlaps the noise generator.
+- **The container is tamper-evident, not tamper-proof.** No signer ships, so an
+  attacker with write access can rewrite objects, chain, manifest and high-water
+  mark together and produce a store that verifies.
 
 ---
 

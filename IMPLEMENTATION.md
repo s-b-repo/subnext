@@ -8,12 +8,19 @@ Rust, **zero dependencies** — no crates at all. Everything the runtime needs
 own, and a specification's reference implementation should be readable end to
 end.
 
+That claim has one qualification worth stating up front: SHA-256 is implemented
+in-tree and checked against the published NIST vectors, because a hash is the
+one cryptographic primitive that can be verified against known output.
+Signatures and authenticated encryption are **traits with no bundled
+implementation** — hand-rolling Ed25519 or an AEAD would trade a dependency for
+a liability. See [context integrity](docs/architecture/context-integrity.md).
+
 ```bash
 cargo run --release -- demo            # worked example through all four ladder levels
 cargo run --release -- bench           # DCR vs full context vs sliding window
 cargo run --release -- bench --scaling --budget 800   # does k stay flat while N grows?
 cargo run --release -- bench --mutate  # is a correction served once the original has dependents?
-cargo test                             # 140 tests
+cargo test                             # 146 tests
 ```
 
 ```rust
@@ -30,10 +37,16 @@ println!("{}", rt.explain(&answer.cited[0])?);   // audit path down to raw spans
 > **On the Python in `dcr/`:** an earlier implementation of this same
 > specification, kept for reference. It is not the reference implementation any
 > more — the docs, the benchmark numbers and the CLI above all describe the Rust
-> in `src/`. The two agree on behaviour (same 300-turn benchmark: 7/7 probes,
-> 457 vs 467 mean tokens per query); Rust is roughly 5x faster on ingest and
-> query. Delete `dcr/`, `tests/*.py`, `examples/quickstart.py` and
-> `pyproject.toml` whenever you want the repo to be Rust-only.
+> in `src/`. It has since diverged: the integrity layer, the evidence hierarchy
+> and the wider baseline set are Rust-only, and keeping two implementations in
+> parity costs more than the second one is worth. On the shared subset the two
+> still agreed at the point they diverged (7/7 probes on the same 300-turn
+> benchmark), and Rust is roughly 5x faster on ingest and query. The token
+> counts are no longer comparable: the Rust extractor and planner have since
+> moved, so quoting a side-by-side figure would be a stale claim rather than a
+> measurement. Delete `dcr/`,
+> `tests/*.py`, `examples/quickstart.py` and `pyproject.toml` whenever you want
+> the repo to be Rust-only.
 
 ---
 
@@ -75,6 +88,10 @@ query ──► classify ──► seed ──► expand edges ──► level-a
 | [speculative context](docs/concepts/speculative-context.md) | `src/speculation.rs` | online predictor, separate budget, feedback |
 | [cost model](docs/concepts/cost-model.md) | `src/telemetry.rs`, `src/bench.rs` | measured, not asserted |
 | [two-system split](docs/architecture/two-system-split.md) | `src/runtime.rs`, `src/llm.rs` | Reasoner sees only `k`; Memory Runtime needs no model |
+| [context integrity](docs/architecture/context-integrity.md) | `src/hash.rs`, `src/merkle.rs`, `src/context_store.rs` | SHA-256, Merkle root, chained generations, anti-rollback |
+| [context integrity](docs/architecture/context-integrity.md) | `src/trust.rs`, `src/scrub.rs` | the admission gateway; bit-rot repair from verified replicas |
+| [failure modes](docs/architecture/failure-modes.md) | across the crate | detection / containment / recovery per mode |
+| [alternatives](docs/alternatives.md) | `src/baselines.rs` | the assemblies DCR is measured against |
 
 Supporting modules with no spec page of their own: `src/text.rs` (tokenisation
 and the scanners that replace a regex engine), `src/embed.rs` (hashing
@@ -91,25 +108,25 @@ three systems, so this compares *context assemblies*, not models.
 ```text
 probe                                    full  window    DCR   DCR tokens
 corrected fact (mid-history)            ok    MISS    ok          163
-corrected fact (late)                   ok     ok     ok          456
+corrected fact (late)                   ok     ok     ok          419
 old fact, never repeated               MISS   MISS    ok          399
 exact quote                            MISS   MISS    ok          963
 justification / multi-hop               ok    MISS    ok          192
 detail buried in a long span            ok    MISS    ok          962
-corrected fact (very late)              ok     ok     ok          136
+corrected fact (very late)              ok     ok     ok          102
 correct                                    5       2      7   of 7
-mean tokens per query                 27362.0  7968.0  467.3
-attention vs full history                 1x    3.4x    59x
+mean tokens per query                 27362.0  7968.0  457.1
+attention vs full history                 1x    3.4x    60x
 ```
 
 `cargo run --release -- bench --scaling --budget 800` — the `O(k + r)` claim:
 
 ```text
   turns   history   nodes   mean k   max k  correct   ingest    query
-    100      8482     124    422.1     764      7/7    0.01s     0.5ms
-    300     27362     298    417.0     787      7/7    0.04s     1.3ms
-   1000     93442     911    404.0     793      7/7    0.17s     2.9ms
-   3000    283253    2661    418.7     795      7/7    0.85s    12.9ms
+    100      8482     124    412.0     764      7/7    0.01s     0.6ms
+    300     27362     298    406.9     787      7/7    0.05s     1.8ms
+   1000     93442     911    393.9     793      7/7    0.20s     3.8ms
+   3000    283253    2661    408.6     795      7/7    1.07s    16.2ms
 
 history grew 33x; active context grew 0.99x
 ```
@@ -120,6 +137,31 @@ would beat it on the retrieval probes. The load-bearing results are the ones no
 model quality changes: the token counts, the flat `k`, and the sliding window's
 misses, which are structural (a fact outside the window is unrecoverable at any
 model quality).
+
+## Persistence: two formats
+
+```bash
+dcr ingest notes/ --store .dcr.json    # a file extension → plain JSON store
+dcr ingest notes/ --store .context     # no extension    → tamper-evident container
+```
+
+The JSON store is unchanged and still the default. The container adds what a
+plaintext file cannot have: objects addressed by the SHA-256 of their canonical
+form, a Merkle root over the set, checkpoints chained so editing history
+invalidates everything after it, and a generation high-water mark that refuses a
+rollback. An edited `.dcr.json` reloads silently; an edited `.context` does not
+load at all.
+
+```bash
+dcr verify --store .context                 # objects, chain, root, signatures
+dcr scrub --repair --store .context --replica /mnt/backup
+dcr checkpoint --store .context             # seal the current state
+dcr quarantine --store .context             # what failed, and why
+```
+
+Read the [limitations](docs/architecture/context-integrity.md#9-what-this-does-not-defend-against)
+before relying on it: without a signer this is tamper-*evident*, not
+tamper-proof.
 
 ## Design decisions the spec left open
 
@@ -136,7 +178,7 @@ the structured state object is its *payload*: `server.ip = 10.0.9.7 · conf=0.90
 · spans=s_83…`. That is the level the fact cache lives at, and the reason 27k
 tokens of transcript collapse into ~450.
 
-**`U(x)`** (open question #8) is a small weighted sum with every term named —
+**`U(x)`** (open question #7) is a small weighted sum with every term named —
 similarity, graph proximity, `explain()` membership, confidence, historical
 read-through, recency, kind prior, contradiction bonus, staleness penalty,
 superseded-source penalty. It is deliberately inspectable rather than learned,
@@ -144,11 +186,12 @@ because a wrong `U` fills the window with cheap useless material *and looks
 efficient while doing it*. `dcr plan <query> --explain` prints the per-node
 arithmetic so a bad answer can be traced to the term that caused it.
 
-**Invalidation cascades** (open question #5) are bounded: `max_cascade` nodes
+**Invalidation cascades** (formerly open question #5, now resolved) are bounded: `max_cascade` nodes
 eagerly, the tail deferred to a lazy queue drained before the next plan. One
 small correction cannot stall a turn by invalidating a whole subgraph.
 
-**Reasoner/Memory consistency** (open question #9) is snapshot isolation plus an
+**Reasoner/Memory consistency** (formerly open question #9, now resolved) is
+snapshot isolation plus an
 interrupt. Every plan records `graph.version`; after the model answers, the
 runtime checks whether anything in the working set was invalidated mid-turn and
 rebuilds rather than returning an answer grounded in state that no longer holds.
@@ -171,6 +214,14 @@ from two sources — an explicitly corrective statement ("Correction: …",
 `contradicts` edge but does not supersede it, and both sides enter the window
 annotated `CONTRADICTS=… — adjudicate, do not pick blindly`. The CLI ingests
 directories in modification-time order for the same reason.
+
+**Object identity is content, and nothing else.** The generation an object was
+written in lives in its sidecar, not in the hashed body, and read counters live
+in one `usage` object per generation rather than inside node objects. Both were
+bugs first: stamping the generation into the body gave unchanged material a new
+address on every commit, and folding read counters into nodes minted a fresh
+copy of every admitted node on every query. An append-only store must grow with
+knowledge, not with reads.
 
 **Repetition is corroboration.** Restating a fact merges into the existing node,
 adds the span and raises confidence, instead of creating a near-duplicate line
@@ -229,6 +280,15 @@ fixed; section A now holds only value-providing `unwrap_or_default`.
 * **The benchmark corpus is synthetic.** It exercises correction, staleness,
   exact quoting, multi-hop justification and buried detail — it is not a
   substitute for a real long-horizon agent trace.
+* **The container is tamper-evident, not tamper-proof.** No signer ships with
+  the crate, so an attacker with write access to the directory can rewrite the
+  objects, the chain, the manifest and the high-water mark together and produce
+  a store that verifies. Hashing cannot prevent that; signatures and an
+  out-of-band high-water mark are what raise the bar.
+* **RAG ties full context on this corpus.** DCR wins the benchmark 7/7 to 5/7,
+  but plain top-k retrieval also scores 5/7 at 2.5x the tokens. The architecture
+  earns its keep on two probes — a fact never repeated, and an exact quote — not
+  across the board.
 
 ## Using a real Reasoner
 

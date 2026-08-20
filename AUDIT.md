@@ -25,8 +25,45 @@ than an unread number.
 | `budget.rs` | `.expect("candidate with no options")` in `cheapest()` | returns `Option<Choice>`; the guarantee is now a type the caller handles, not a panic |
 | `llm.rs` | `&scored[0]` after a length guard | `scored.first()` — the method carries no index that could panic if the guard moves |
 
-After these, section A holds only `unwrap_or_default()`, which provides a value
-and cannot panic.
+After these, section A holds only `unwrap_or_default()` in library code, which
+provides a value and cannot panic.
+
+## The integrity layer (added Aug 2026)
+
+`src/hash.rs`, `src/merkle.rs`, `src/context_store.rs`, `src/trust.rs`,
+`src/scrub.rs` and `src/baselines.rs` are new since the rows above. Re-running
+the matrix over them moved four counts; each is dispositioned here rather than
+left to be rediscovered.
+
+**Section L (crypto) still reports zero**, which is worth stating explicitly
+now that the crate contains a hash implementation. The matrix's crypto patterns
+look for weak primitives (MD5, SHA-1, ECB, hardcoded keys, `rand` for secrets)
+and for none of them does SHA-256 with domain-separated, length-prefixed inputs
+qualify. What the matrix cannot check is whether the implementation is
+*correct*, which is why `src/hash.rs` is tested against the published NIST
+vectors rather than against itself — and why no signature or AEAD is
+hand-rolled at all.
+
+**A — panicking forms now appear inside `#[cfg(test)]` modules (`unwrap`,
+`expect`, `panic!`, `assert*`).** The matrix scans whole files, so unit tests
+inside `src/` are counted alongside library code. A test that cannot panic
+cannot fail, so these are correct where they are. The invariant still holds
+where it matters: the only non-test panicking form under `src/` is the
+pre-existing `.last().unwrap()` in the ablation benchmark.
+
+**E — numeric casts (72 → 100).** The new hits are `as u64` / `as usize` in
+length prefixes and hex conversion, and `as f64` in the report arithmetic.
+Domain conversions in code that computes sizes it produced itself.
+
+**F — `std::fs::read` / `write` (1 → 13).** The container is a directory of
+files, so it reads and writes rather more than a single-file store did. Still
+synchronous, still a deliberately offline library. Object writes go through
+`write_atomic` (temp file plus rename), which is the property that matters here:
+a partial write must never be mistakable for a whole object.
+
+**B — `let _ = …` (11 → 14).** The new ones discard the result of removing a
+sidecar during quarantine and of cleaning a scratch directory in the tamper
+probe. In both, failure means a leftover file rather than a wrong result.
 
 ## Accepted, with reasons
 
@@ -89,5 +126,5 @@ O (performance), P (API hygiene) report zero hits.
 `--strict` is **not** wired into CI, because a green result would require
 waiving every accepted line above, and a gate that is mostly waivers tests
 nothing. The useful invariant — no unreviewed panics in library code — is held
-by section A being empty of panicking forms and by this file existing. Re-run
-the audit after any change to `src/` and add a row here for anything new.
+by library code being empty of panicking forms and by this file existing.
+Re-run the audit after any change to `src/` and add a row here for anything new.

@@ -211,7 +211,7 @@ embarrassing.
 
 ## 6. Sub-linear retrieval (standing known gap)
 
-Query latency is 5.9ms → 77.5ms across a 33× history growth because the vector
+Query latency is 0.6ms → 16.2ms across a 33× history growth because the vector
 search is a linear scan over state nodes. Attention is flat; retrieval is not.
 The cost model needs sub-linear retrieval for the `O(k + r)` claim to hold at
 scale, and until it lands the scaling table should be read as "flat attention,
@@ -223,9 +223,12 @@ Item 5 above is a mitigation, not a substitute.
 
 ## 7. Is graph expansion earning its place?
 
-From the ablation: turning graph expansion off makes the runtime **46% cheaper**
-(467.3 → 252.1 tokens) and loses nothing on this corpus. Same for reference
+From the ablation: turning graph expansion off makes the runtime **43% cheaper**
+(413.6 → 235.3 mean k) and loses nothing on this corpus. Same for reference
 linking — no effect at all here.
+
+*(Re-measured after superseded-source evidence stopped seeding; the earlier
+figure was 467.3 → 252.1. The conclusion did not move, only the arithmetic.)*
 
 Two readings, and the current corpus cannot separate them:
 
@@ -261,3 +264,95 @@ The general problem is untouched. Real corrections carry verbs, and shapes like
 `"X has moved to Y"`, `"X was replaced by Y"`, `"we switched X to Y"` will all
 still extract badly or not at all. Worth a corpus of correction phrasings before
 widening the rule, since over-extraction is worse than under-extraction here.
+
+---
+
+## 10. The three probes DCR fails — DISCRIMINATING CORPUS ADDED
+
+`bench --baselines` now runs a second corpus built so that similarity is
+actively misleading and so that *answering at all* is sometimes wrong. DCR
+scores **2/5** on it and loses to recursive map-reduce. Item 2's question is
+answered in the process: the lexical decoy probe puts the query's exact words
+four times in the stale document and once in the correction, and DCR still
+serves the correction — **supersession is load-bearing, not lexical luck**.
+
+The three failures are the work:
+
+### 10a. A derived figure stated as prose is never invalidated
+
+`"The incident cost estimate is 2160 USD, computed from the engineer count, the
+incident hours and the hourly rate."` — then the hourly rate is corrected. The
+figure is now arithmetically dead and DCR serves it anyway, because invalidation
+only tracks derivations the runtime actually *computed*. A number that arrived
+as text has no dependency edges and nothing marks it stale.
+
+The fix is not obvious. Parsing "computed from X, Y and Z" into real dependency
+edges would extend the extractor into inference, which is exactly where wrong
+facts get cached with confidence. A narrower option: when a claim's *text* names
+other keys and one of those keys is later superseded, mark the claim
+`Contradicted` rather than stale — surfacing the doubt without asserting the
+arithmetic.
+
+### 10b. A dense window makes near-miss answers easy to reach for
+
+Asked `"what is the severity-1 pager phone number?"` — a fact history never
+states — DCR serves the adjacent paging-policy line. Full context and RAG both
+decline, because their raw text scores below the reasoner's threshold. DCR's
+window is pre-filled with *selected* facts, so whatever is nearest looks good.
+
+This is the cost of assembling eagerly, and it is the failure mode
+[@vespermind](https://www.moltbook.com/post/f82bcd30-68dc-4f31-846b-66913b846001)
+described from the other direction: fluent because nothing revealed that the
+answer was missing. Candidate fix: an admission floor — if no candidate clears a
+minimum utility, assemble nothing and let the reasoner say so.
+
+### 10c. Two disagreeing sources are settled by arrival time
+
+Two claims on one key, neither phrased as a correction, and the later silently
+supersedes the earlier with no marker (`may_supersede`). Last-writer-wins is the
+right default for a chronological transcript, and `provenance.md` now states the
+rule as a table instead of implying contradictions are always kept. But the
+consequence is real: merge two transcripts and the merge order decides what is
+true, silently.
+
+Worth considering: a `contradicts` edge recorded even when supersession fires,
+so the audit path shows what was overruled even though the window does not.
+
+---
+
+## 11. Repetition inflates confidence past stated fact
+
+Corroboration raises confidence, and the noise generator repeats. After 300
+turns a noise sentence has ~37 corroborations and `conf=0.97`, while a fact
+stated once sits at `0.80` — so the planner prefers `"which = within noise"` and
+`"coffee.machine = broken again"` over the material a probe is asking about.
+
+This only surfaced because an adversarial corpus accidentally shared vocabulary
+with `NOISE`, which is itself worth recording: **probe vocabulary that collides
+with the noise generator measures the collision, not the property**. Three of
+the five probes in item 10 had to be rewritten for that reason.
+
+The underlying question is whether corroboration should raise confidence at all,
+or whether it should raise a separate `support` term that the utility function
+weights differently. Repetition means "many sources agree"; it does not mean
+"more likely to be what you are asking about".
+
+---
+
+## 12. Benchmarks are green because nothing asserted the invariant
+
+Two integrity bugs shipped with a green test suite: the checkpoint chain covered
+only some fields, and object addresses changed on every commit. Both were found
+by *running the CLI*, not by tests. Each got a regression test afterwards, which
+pins the one case that was noticed.
+
+Replaced with tests that walk the class: every checkpoint field is mutated in
+turn and must break the chain; every object field is mutated in turn and must
+break the address; an unchanged save must rewrite zero bytes. The first of those
+immediately found a third gap (`schema` was reconstructed from a constant, so it
+was outside the digest).
+
+The general lesson is worth applying elsewhere: **where an invariant is "all of
+X", test all of X rather than the member that once failed.** Candidates —
+every `Kind`/`Origin`/`Status` combination surviving a round trip, every ladder
+level costing less than the one below it, every `Rejection` variant reachable.

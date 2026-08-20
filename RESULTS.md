@@ -3,12 +3,21 @@
 Measured output of the reference implementation, reproducible from this repo:
 
 ```bash
-python -m dcr --budget 1200 bench            # the context-rot table
-python -m dcr --budget 800 bench --scaling   # the flat-k table
-python -m unittest discover -s tests         # 72 tests, ~1s
+cargo run --release -- bench                        # the context-rot table
+cargo run --release -- bench --baselines            # DCR vs RAG / summarize / recursive
+cargo run --release -- bench --scaling --budget 800 # the flat-k table
+cargo run --release -- bench --rebuild              # what does a workspace rebuild cost?
+cargo run --release -- bench --tamper               # can the container detect tampering?
+cargo test                                          # 146 tests, ~14s
 ```
 
-Both benchmarks are deterministic and offline. No API key, no network.
+Every benchmark is deterministic and offline. No API key, no network.
+
+**Measured at `1ff91f6`.** Benchmark numbers are pinned to a commit on purpose:
+they move whenever retrieval, extraction or the planner moves, and a table
+without a revision attached is a table nobody can reproduce. Re-run the commands
+above after any change to `src/` and update this file with what they print —
+including when the numbers get worse.
 
 ---
 
@@ -27,29 +36,34 @@ Per probe:
 
 | probe | full | window | DCR | DCR tokens |
 |---|:---:|:---:|:---:|---:|
-| corrected fact (mid-history) | ok | MISS | ok | 162 |
-| corrected fact (late) | ok | ok | ok | 447 |
-| old fact, never repeated | MISS | MISS | ok | 393 |
+| corrected fact (mid-history) | ok | MISS | ok | 163 |
+| corrected fact (late) | ok | ok | ok | 419 |
+| old fact, never repeated | MISS | MISS | ok | 399 |
 | exact quote | MISS | MISS | ok | 963 |
-| justification / multi-hop | ok | MISS | ok | 189 |
-| detail buried in a long span | ok | MISS | ok | 908 |
-| corrected fact (very late) | ok | ok | ok | 134 |
+| justification / multi-hop | ok | MISS | ok | 192 |
+| detail buried in a long span | ok | MISS | ok | 962 |
+| corrected fact (very late) | ok | ok | ok | 102 |
 
 Telemetry for the DCR column:
 
 ```
 escalation_rate         : 0.143
-stale_fact_read_rate    : 0.0
-tokens_per_query_mean   : 456.6
+stale_fact_read_rate    : 0.000
+tokens_per_query_mean   : 457.1
 tokens_per_query_max    : 963
 budget_overflows        : 0
 demotions               : 3
-audit_path_completeness : 1.0
-compression_ratio       : 59.8
+audit_path_completeness : 1.000
+compression_ratio       : 59.7
+prefetch_hit_rate       : n/a
+wasted_builds           : 0
 ```
 
 Escalations are counted and charged: a probe that needed to drop to L0 costs
 more, and that cost is inside the DCR token column, not hidden beside it.
+`prefetch_hit_rate` is `n/a` rather than `0.000` because these probes never
+trigger a prefetch — a rate over zero attempts is undefined, and printing zero
+would read as "speculation is failing" instead of "speculation has not run".
 
 ### How to read this table
 
@@ -69,37 +83,145 @@ The two load-bearing results are:
 
 ---
 
+## Against baselines that also retrieve
+
+Full context and a sliding window both fail the same way — they truncate by
+position — so beating them proves less than it looks. These three retrieve:
+
+| probe | full | RAG | summarize | recurse | DCR |
+|---|:---:|:---:|:---:|:---:|:---:|
+| corrected fact (mid-history) | ok | ok | MISS | ok | ok |
+| corrected fact (late) | ok | ok | MISS | MISS | ok |
+| old fact, never repeated | MISS | MISS | MISS | MISS | ok |
+| exact quote | MISS | MISS | MISS | MISS | ok |
+| justification / multi-hop | ok | ok | MISS | ok | ok |
+| detail buried in a long span | ok | ok | MISS | ok | ok |
+| corrected fact (very late) | ok | ok | ok | ok | ok |
+| **correct** | 5/7 | 5/7 | 1/7 | 4/7 | **7/7** |
+| **mean tokens/query** | 27,362 | 1,168 | 1,197 | 31,074 | **457** |
+
+- **RAG ties full context at 5/7**, using the same hybrid index DCR uses, at
+  2.5x DCR's token cost. This is the honest headline: plain top-k retrieval is a
+  strong baseline. The gap is two specific probes — a fact never repeated (there
+  is nothing for similarity to latch onto) and an exact quote (top-k returns the
+  right chunk, not the right bytes).
+- **Summarize-all collapses to 1/7.** Uniform compression at the same budget
+  destroys exactly the details being asked for — the strongest evidence here
+  that *selective* representation beats uniform compression.
+- **Recursive costs more than full context** (31k vs 27k tokens), because it
+  reads every chunk and then reads its own digest. Unlimited coverage is not
+  free, and charging for it is the honest accounting.
+
+### …and against probes built to make DCR lose
+
+Beating truncation baselines proves little, and on the standard corpus RAG ties
+full context — most of those probes are findable by similarity. This second
+corpus is built so that similarity is actively misleading, and so that
+*answering at all* is sometimes the wrong move:
+
+| probe | full | RAG | summarize | recurse | DCR |
+|---|:---:|:---:|:---:|:---:|:---:|
+| lexical decoy on a stale fact | ok | ok | MISS | ok | ok |
+| three-hop dependency (context) | ok | ok | MISS | ok | ok |
+| stale derivation (must refuse) | MISS | MISS | ok | ok | **MISS** |
+| absent fact (must refuse) | MISS | MISS | ok | MISS | **MISS** |
+| contested fact (order decides) | MISS | MISS | MISS | MISS | **MISS** |
+| **correct** | 2/5 | 2/5 | 2/5 | **3/5** | 2/5 |
+| **mean tokens/query** | 27,382 | 1,133 | 1,180 | 31,180 | **237** |
+
+**DCR does not win this table.** Recursive map-reduce beats it. The three
+failures are the useful part:
+
+- **Stale derivation.** A figure stated as text (`the incident cost estimate is
+  2160 USD, computed from …`) is served after one of its inputs is corrected.
+  Invalidation only tracks derivations the runtime actually *computed*; a number
+  that arrived as prose is never recomputed and nothing marks it dead.
+- **Absent fact.** Asked for a phone number that was never stated, DCR serves
+  the adjacent paging-policy line. A window pre-filled with selected facts makes
+  near-miss material easy to reach for — the cost of assembling eagerly.
+- **Contested fact.** Two claims disagree and neither is phrased as a
+  correction, so ingest order decides and no marker reaches the window. That is
+  the documented `may_supersede` rule, and this row prices it.
+
+The two probes it does pass are worth naming too. The **lexical decoy** answers
+a question raised in `TODO.md`: the stale document repeats the query's words
+four times and the correction states them once, and DCR still serves the
+correction — supersession is load-bearing, not lexical luck. The **three-hop**
+probe is scored on the assembled context rather than the answer, because the
+harness's reasoner is a line-matcher and cannot perform a join; that scoring is
+applied to every column equally.
+
+---
+
 ## k stays flat while history grows
 
 Same probes, same `B_attention = 800`, history scaled 33x:
 
 | turns | history | nodes | mean k | max k | correct | ingest | query |
 |---:|---:|---:|---:|---:|:---:|---:|---:|
-| 100 | 8,482 | 121 | 418.3 | 764 | 7/7 | 0.08s | 5.9ms |
-| 300 | 27,362 | 295 | 413.9 | 786 | 7/7 | 0.27s | 12.5ms |
-| 1,000 | 93,442 | 908 | 418.7 | 793 | 7/7 | 1.23s | 33.1ms |
-| 3,000 | 283,253 | 2,658 | 411.6 | 785 | 7/7 | 5.73s | 77.5ms |
+| 100 | 8,482 | 124 | 412.0 | 764 | 7/7 | 0.01s | 0.6ms |
+| 300 | 27,362 | 298 | 406.9 | 787 | 7/7 | 0.05s | 1.8ms |
+| 1,000 | 93,442 | 911 | 393.9 | 793 | 7/7 | 0.20s | 3.8ms |
+| 3,000 | 283,253 | 2,661 | 408.6 | 795 | 7/7 | 1.07s | 16.2ms |
 
-History grew **33x**; active context grew **0.98x**, and accuracy held at 7/7 at
+History grew **33x**; active context grew **0.99x**, and accuracy held at 7/7 at
 every size. That is the `O(k + r)` shape from the cost model, measured rather
 than asserted.
 
-Storage still grows `O(N)` — 121 → 2,658 nodes. The claim is bounded
+Storage still grows `O(N)` — 124 → 2,661 nodes. The claim is bounded
 *attention*, not bounded storage.
+
+---
+
+## Workspace rebuild
+
+"Destroy and rebuild the workspace at any time" is only a guarantee if rebuild
+is cheap, so it is measured:
+
+**Mean cold rebuild 1.75 ms; mean warm assembly 0.24 ms** (300 turns, 298 nodes).
+
+Cold drops every cached representation and reassembles from L0 alone; warm is
+the same query with caches populated. The 7x gap tracks how much L1 must be
+rebuilt — probes admitting only cached facts rebuild nothing and cost the same
+either way. Full table and caveats:
+[workspace rebuild](docs/architecture/workspace-rebuild.md).
+
+---
+
+## Tamper detection
+
+`bench --tamper` corrupts a container three ways and asserts each is caught:
+
+| attack | detected | by |
+|---|:---:|---|
+| flip one bit in an object | yes | content address |
+| …and the runtime refuses to load it | yes | gateway |
+| rewrite a historical checkpoint | yes | hash chain |
+| roll back to an older signed state | yes | generation high-water mark |
+
+This probe earned its place: the first version of the chain digest covered only
+the Merkle root and the delta, so a rewritten checkpoint passed. The probe caught
+it, and the chain now covers the whole checkpoint body.
+
+**What it does not show:** resistance to an attacker who rewrites the objects,
+the chain, the manifest and the high-water mark together. Hashes make tampering
+evident, not impossible. See
+[context integrity §9](docs/architecture/context-integrity.md#9-what-this-does-not-defend-against).
 
 ---
 
 ## Known gap: retrieval is not sub-linear
 
-**Query latency is not flat: 5.9ms → 77.5ms across the scaling run.** Vector
-search in `index.py` is a linear scan over state nodes, so retrieval cost grows
-with the graph even though the assembled context does not.
+**Query latency is not flat: 0.6ms → 16.2ms across the scaling run.** Vector
+search in `src/index.rs` is a linear scan over state nodes, so retrieval cost
+grows with the graph even though the assembled context does not.
 
 The cost model in [`docs/concepts/cost-model.md`](docs/concepts/cost-model.md)
 requires sub-linear retrieval for the `O(k + r)` claim to hold at real scale, so
-this is the next real piece of work. It is a two-method swap behind `index.py`
-(an ANN index), not a redesign — but until it lands, the flat-k table above
-should be read as "flat attention, linear retrieval."
+this is the next real piece of work. It is a two-method swap behind
+`src/index.rs`'s `VectorIndex` (an ANN index), not a redesign — but until it
+lands, the flat-k table above should be read as "flat attention, linear
+retrieval."
 
 ---
 
@@ -109,26 +231,32 @@ Every module maps to a page in [`docs/`](docs/):
 
 | module | page |
 |---|---|
-| `spans.py` | L0 of the [representation ladder](docs/concepts/representation-ladder.md) |
-| `ladder.py` | [Representation ladder](docs/concepts/representation-ladder.md) |
-| `graph.py` | [Memory graph](docs/architecture/memory-graph.md) + [provenance](docs/architecture/provenance.md) |
-| `budget.py` | [Attention budget](docs/concepts/attention-budget.md) — the knapsack |
-| `planner.py` | [Relevance planner](docs/architecture/relevance-planner.md) |
-| `speculation.py` | [Speculative context](docs/concepts/speculative-context.md) — prefetch |
-| `indexer.py` | [State indexer](docs/architecture/state-indexer.md) |
-| `policy.py` | [Decision policy](docs/architecture/decision-policy.md) |
-| `telemetry.py` | Phase-5 metrics in the [roadmap](docs/roadmap.md) |
+| `src/spans.rs` | L0 of the [representation ladder](docs/concepts/representation-ladder.md) |
+| `src/ladder.rs` | [Representation ladder](docs/concepts/representation-ladder.md) |
+| `src/graph.rs` | [Memory graph](docs/architecture/memory-graph.md) + [provenance](docs/architecture/provenance.md) |
+| `src/budget.rs` | [Attention budget](docs/concepts/attention-budget.md) — the knapsack |
+| `src/planner.rs` | [Relevance planner](docs/architecture/relevance-planner.md) |
+| `src/speculation.rs` | [Speculative context](docs/concepts/speculative-context.md) — prefetch |
+| `src/indexer.rs` | [State indexer](docs/architecture/state-indexer.md) |
+| `src/policy.rs` | [Decision policy](docs/architecture/decision-policy.md) |
+| `src/telemetry.rs` | Phase-5 metrics in the [roadmap](docs/roadmap.md) |
+| `src/hash.rs`, `src/merkle.rs`, `src/context_store.rs`, `src/trust.rs`, `src/scrub.rs` | [Context integrity](docs/architecture/context-integrity.md) |
+| `src/baselines.rs` | The falsification set in [audit-2026-08](docs/audit-2026-08.md) |
 
 Invariants the wiki states as prose are enforced in code and covered by tests:
 
 - an unsourced fact raises `ProvenanceError` — a claim cannot exist without a
-  path down to raw spans (`graph.py`, `test_graph.py`)
+  path down to raw spans (`graph.rs`, `tests/graph.rs`)
 - nothing is ever deleted; superseded nodes are marked, not removed
-- stale nodes never reach the model (`stale_fact_read_rate: 0.0`)
-- demotion-beats-eviction falls out of the knapsack, verified against a brute-force
-  optimum in the tests rather than hand-asserted
+- stale nodes never reach the model (`stale_fact_read_rate: 0.000`)
+- demotion-beats-eviction falls out of the knapsack, verified against a
+  brute-force optimum in the tests rather than hand-asserted
+- an object's address is its content; an edited object cannot load
+  (`tests/context_store.rs`)
+- a repair may only use a replica that verifies independently (`tests/scrub.rs`)
+- a derived hypothesis never renders like an observation (`tests/evidence.rs`)
 
-`audit_path_completeness: 1.0` means every answer above resolves to raw source
+`audit_path_completeness: 1.000` means every answer above resolves to raw source
 spans via `rt.explain(...)`.
 
 ---

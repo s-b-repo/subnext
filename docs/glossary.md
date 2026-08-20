@@ -59,3 +59,36 @@ calls.
 **Supersedes** — edge marking a node as replaced without deleting history.
 
 **`τ` (tau)** — confidence threshold above which speculative context is materialized.
+
+## Integrity terms
+
+**Object address** — the SHA-256 of an object's canonical encoding, and the only
+thing the container stores it under. Distinct from a node or span *id*, which is
+a short non-cryptographic name.
+
+**Canonical encoding** — the byte form that gets hashed: object keys sorted,
+repeated keys dropped, non-finite numbers written as `null`. A digest must be a
+property of the value, not of how the value was built.
+
+**Merkle root** — a single digest over the whole object set, with `log n`
+inclusion proofs for any one object. What makes scrubbing and repair affordable.
+
+**Generation** — one sealed, chained state of the container. Monotonic, and the
+highest ever accepted is persisted as an anti-rollback high-water mark.
+
+**Chain digest** — `H(parent_chain ‖ canonical(checkpoint))`. Covers the whole
+checkpoint body, so editing any historical generation invalidates every later one.
+
+**Tamper-evident** — modification can be detected. Not the same as
+tamper-*proof*, which this container is not without a signer.
+
+**Trust label** — how much an object's *content* is believed, independent of
+whether its bytes are intact. Checked after integrity, because a valid signature
+does not make content trustworthy.
+
+**Quarantine** — where an object goes when it fails verification. The runtime
+reports the failure and the trusted replacement; the reasoner is never asked to
+adjudicate suspect bytes.
+
+**Origin** — a node's epistemic source: observed, externally sourced, computed,
+inferred, or hypothetical. Orthogonal to kind and status.

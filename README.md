@@ -97,10 +97,14 @@ container, and the telemetry the evaluation design asks for. See
 the honest limitations.
 
 Measured on a 300-turn synthetic incident transcript (27k tokens of history,
-`B_attention` = 1200): **467 tokens per query — 59x less attention than the full
+`B_attention` = 1200): **457 tokens per query — 60x less attention than the full
 history — with `k` staying flat as history grows 33x.** Against baselines that
 also retrieve, DCR answers 7/7 probes where top-k RAG answers 5/7 at 2.5x the
 tokens, and uniform summarisation answers 1/7.
+On a second corpus built so similarity is misleading and refusing is sometimes
+correct, **DCR scores 2/5 and loses to recursive map-reduce** — it serves a
+derived figure whose inputs were corrected, and answers a question history never
+addresses. Both are real, neither is fixed, and both are reported.
 Full numbers, scaling table, and caveats: [RESULTS.md](RESULTS.md).
 
 Memory is persisted either as a plain JSON file or as a **`.context`

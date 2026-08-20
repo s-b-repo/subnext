@@ -178,12 +178,19 @@ the context window.
 | Solution B — provenance | `E_t` ([provenance](provenance.md)) |
 | Solution B — what to return | [decision policy](decision-policy.md) + [attention budget](../concepts/attention-budget.md) |
 | Solution B — predicting needs | [speculative context](../concepts/speculative-context.md) |
+| Solution B — proving what it stored | [context integrity](context-integrity.md) |
 
 ## Open issues
 
 - Where does node extraction live? It is a reasoning task (A-like) running on B's schedule.
-- B's background consolidation can contradict what A currently believes mid-task; needs a
-  consistency protocol.
-- Workspace rebuild cost is the real bound on "destroy and rebuild at any time".
+- ~~B's background consolidation can contradict what A currently believes mid-task~~ — resolved
+  by snapshot isolation plus an interrupt; every plan records `graph.version` and the runtime
+  re-plans rather than answering from state that no longer holds.
+- ~~Workspace rebuild cost is the real bound on "destroy and rebuild at any time"~~ — measured:
+  1.75 ms mean cold rebuild against 27k tokens of history. See
+  [workspace rebuild](workspace-rebuild.md).
+- B must also be able to prove it returned what it stored. That is a third responsibility the
+  original split did not name, and it lives in
+  [context integrity](context-integrity.md).
 
 See [open questions](../open-questions.md).
