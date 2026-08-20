@@ -111,10 +111,13 @@ def cmd_demo(args) -> int:
 
 
 def cmd_bench(args) -> int:
-    from .bench import run_benchmark, run_scaling
+    from .bench import run_benchmark, run_mutation_probe, run_scaling
 
     if args.scaling:
         run_scaling(budget=args.budget)
+        return 0
+    if args.mutate:
+        run_mutation_probe(turns=args.turns, budget=args.budget)
         return 0
     run_benchmark(turns=args.turns, budget=args.budget, window=args.window)
     return 0
@@ -156,6 +159,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--window", type=int, default=8000)
     p.add_argument("--scaling", action="store_true",
                    help="does k stay flat while history grows?")
+    p.add_argument("--mutate", action="store_true",
+                   help="is a correction served once the original has dependents?")
     p.set_defaults(func=cmd_bench)
     return parser
 

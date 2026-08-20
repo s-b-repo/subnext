@@ -64,6 +64,20 @@ _ASSIGN = re.compile(
     r"(?=\s*(?:,|;|\band\b|\bbut\b|\.(?:\s|$)|$))",
     re.M,
 )
+# "the datastore was migrated and is now postgres-15" — the subject carries
+# across the conjunction, so the value after "is now" is the live one and the
+# participle is not a value at all. Deliberately tight: the copula must be
+# present tense *and* followed by `now`, because "X is A and is B" is a real
+# ambiguity and over-extraction is not a neutral failure here.
+_RESTATEMENT = re.compile(
+    r"[\s,;]*(?:and|but|then|so)?\s*(?:it\s+)?(?:is|are)\s+now\s+"
+    r"(?P<value>[^,;\n]{1,120}?)"
+    r"(?=\s*(?:,|;|\band\b|\bbut\b|\.(?:\s|$)|$))",
+    re.I,
+)
+# A fronted temporal adverb is not part of the value: "is now X" carries X.
+_LEADING_ADVERB = re.compile(r"^(?:now|currently|presently|already)\s+", re.I)
+
 _DECISION = re.compile(
     r"^\s*(?:[-*•]\s*)?(?:decision|decided|we (?:will|decided to)|action|resolved)\b[:\s]+"
     r"(?P<value>.{3,160})", re.I | re.M)
@@ -132,14 +146,27 @@ class HeuristicExtractor:
         instead of discarded, which is how corrections get extracted at all.
         """
         out: list[tuple[str, str]] = []
+        consumed_to = 0
         for match in _ASSIGN.finditer(text):
+            if match.start() < consumed_to:
+                continue
             key = self._normalise_key(match.group("key"))
             value = self._clean_value(match.group("value"))
+            consumed_to = match.end()
+            restated = _RESTATEMENT.match(text, match.end())
+            if restated:
+                value = self._clean_value(restated.group("value"))
+                consumed_to = restated.end()
             if not key or not value or len(key.split()) > 4:
                 continue
             if key in _NOISE_KEYS:
                 if depth == 0:
-                    out.extend(self._assignments(value, depth + 1))
+                    # The value group stops at the conjunction, so descending
+                    # into it alone would hand the inner parse "was migrated"
+                    # and never "is now postgres-15". Descend into the wider
+                    # slice the restatement consumed.
+                    inner = text[match.start("value") : consumed_to]
+                    out.extend(self._assignments(inner, depth + 1))
                 continue
             out.append((key, value))
         return out
@@ -151,7 +178,7 @@ class HeuristicExtractor:
         quoted = re.match(r'^["\u201c](?P<inner>[^"\u201d]{1,120})["\u201d]', value)
         if quoted:
             return quoted.group("inner").strip()
-        return value.strip('"\u201c\u201d').strip()
+        return _LEADING_ADVERB.sub("", value.strip('"\u201c\u201d').strip()).strip()
 
     @staticmethod
     def _normalise_key(key: str) -> str:

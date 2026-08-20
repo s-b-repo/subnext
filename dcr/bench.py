@@ -368,3 +368,205 @@ def run_scaling(sizes=(100, 300, 1000, 3000), budget: int = 800) -> list[dict]:
 
 if __name__ == "__main__":
     run_benchmark()
+
+
+# ---------------------------------------------------------------------------
+# Mutation-and-correction probe
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Mutation:
+    """A fact planted early, referenced until it has dependents, then corrected.
+
+    The repeated references are the point. A correction arriving at 85% of the
+    way through has to overcome whatever weight the original accumulated — graph
+    proximity, read-through, and the dependents built on top of it. Correcting
+    an isolated leaf is the easy case and proves little.
+    """
+
+    label: str
+    query: str
+    stale: str          # ground truth: the value that must no longer be served
+    live: str           # ground truth: the value that must be served instead
+    establish: str
+    references: tuple[str, ...]
+    correction: str
+
+
+MUTATIONS: tuple[Mutation, ...] = (
+    Mutation(
+        label="datastore (4 dependents)",
+        query="what is the primary datastore?",
+        stale="postgres-11",
+        live="postgres-15",
+        establish="The primary datastore is postgres-11 on host db-alpha.",
+        references=(
+            "Nightly backup job targets the primary datastore postgres-11 on db-alpha; retention is 14 days.",
+            "The read replica lags the primary datastore postgres-11 by under 200ms during business hours.",
+            "Schema migration 0042 was applied against postgres-11 and verified on the replica.",
+            "Capacity note: postgres-11 on db-alpha is at 61 percent disk with no growth alarm set.",
+        ),
+        correction="Correction: the primary datastore was migrated and is now postgres-15 on host db-omega.",
+    ),
+    Mutation(
+        label="autoscaler threshold (3 dependents)",
+        query="what is the autoscaler threshold?",
+        stale="65 percent",
+        live="80 percent",
+        establish="The autoscaler threshold is 65 percent CPU.",
+        references=(
+            "Load test 19 held the fleet just under the autoscaler threshold of 65 percent CPU for forty minutes.",
+            "The scale-out event at 03:12 fired because sustained CPU crossed 65 percent.",
+            "Cost review flagged that a 65 percent trigger keeps roughly two extra nodes warm overnight.",
+        ),
+        correction="Update: the autoscaler threshold is 80 percent CPU after the cost review.",
+    ),
+    Mutation(
+        label="failover region (3 dependents)",
+        query="what is the failover region?",
+        stale="eu-west-2",
+        live="eu-central-1",
+        establish="The failover region is eu-west-2.",
+        references=(
+            "The disaster recovery runbook fails traffic over to eu-west-2 and expects a 12 minute RTO.",
+            "Cross-region replication to eu-west-2 was re-enabled after the maintenance window.",
+            "The last failover drill exercised eu-west-2 and completed inside the RTO budget.",
+        ),
+        correction="Correction: the failover region is eu-central-1, eu-west-2 is being decommissioned.",
+    ),
+    Mutation(
+        label="escalation extension (2 dependents)",
+        query="what is the escalation extension?",
+        stale="4412",
+        live="4419",
+        establish="The escalation extension is 4412 for the platform on-call rota.",
+        references=(
+            "Page at 02:40 was routed to extension 4412 and acknowledged in ninety seconds.",
+            "The incident bridge dials extension 4412 before opening a severity review.",
+        ),
+        correction="Update: the escalation extension is 4419, the rota moved to a new bridge.",
+    ),
+)
+
+
+def build_mutation_corpus(turns: int = 300) -> Corpus:
+    """Establish each fact early, reference it across the first 60%, correct at 85%."""
+    corpus = Corpus()
+    for i, m in enumerate(MUTATIONS):
+        corpus.docs.append((f"m{i:02d}e", m.establish))
+
+    established = len(corpus.docs)
+    correct_at = int(turns * 0.85)
+    ref_span_end = int(turns * 0.60)
+    refs: list[tuple[int, str]] = []
+    total_refs = sum(len(m.references) for m in MUTATIONS) or 1
+    slot = 0
+    for m in MUTATIONS:
+        for ref in m.references:
+            at = established + (max(ref_span_end - established, 0) * slot) // total_refs
+            refs.append((max(at, established), ref))
+            slot += 1
+
+    corrections = {correct_at + i: m.correction for i, m in enumerate(MUTATIONS)}
+    for i in range(established, max(turns, established + 1)):
+        doc_id = f"t{i:03d}"
+        if i in corrections:
+            corpus.docs.append((doc_id, corrections[i]))
+            continue
+        planted = [r for at, r in refs if at == i]
+        if planted:
+            corpus.docs.append((doc_id, "\n\n".join(planted)))
+            continue
+        corpus.docs.append((doc_id, NOISE[i % len(NOISE)].format(n=i)))
+    return corpus
+
+
+def run_mutation_probe(turns: int = 300, budget: int = 1200) -> None:
+    """Is a correction served once the original has dependents, and can the
+    runtime show the supersession edge that justifies it?
+
+    Both measurements are made against ground truth held by the corpus, not
+    against the runtime's own ``STALE`` marking. That is the whole point:
+    ``stale_fact_read_rate`` counts entries whose node the runtime has *marked*
+    stale, and ``supersede_on_conflict`` gates whether anything is ever marked —
+    so the metric cannot fire in the one configuration where superseded values
+    are actually served. A control that cannot fire and a control that passes
+    are indistinguishable. The ``stale served`` column below can fire.
+    """
+    from . import DCR
+
+    variants: list[tuple[str, dict]] = [
+        ("full runtime", {}),
+        ("no supersession", {"supersede_on_conflict": False}),
+    ]
+
+    corpus = build_mutation_corpus(turns)
+    n = len(MUTATIONS)
+    print(f"MUTATION AND CORRECTION - {turns} turns, "
+          f"{estimate_tokens(corpus.text())} tokens of history, B_attention = {budget}")
+    print(f"{n} facts established early, "
+          f"{sum(len(m.references) for m in MUTATIONS)} references in total, "
+          f"superseded at 85% of history")
+    header = (f"{'variant':<24}{'corrected':>11}{'stale served':>14}"
+              f"{'edge shown':>12}{'stale k':>9}   notes")
+    print("-" * len(header))
+    print(header)
+    print("-" * len(header))
+
+    control_fired = False
+    served: list[tuple[str, str, int]] = []
+    for name, kwargs in variants:
+        rt = DCR(budget=budget, **kwargs)
+        for _, text in corpus.docs:
+            rt.ingest(text)
+        corrected = stale = edges = 0
+        notes: list[str] = []
+        for m in MUTATIONS:
+            answer = rt.ask(m.query)
+            text = (answer.text or "").lower()
+            live_hit = m.live.lower() in text
+            stale_hit = m.stale.lower() in text
+            if live_hit:
+                corrected += 1
+            elif not stale_hit:
+                notes.append(f"no answer {m.label}")
+            if stale_hit:
+                stale += 1
+                notes.append(f"STALE {m.label}")
+            def _supersedes_stale(node_id: str) -> bool:
+                node = rt.graph.get(node_id)
+                if node is None:
+                    return False
+                for old_id in node.meta.get("supersedes", ()) or ():
+                    old = rt.graph.get(old_id)
+                    if old is not None and m.stale.lower() in (old.value or "").lower():
+                        return True
+                return False
+
+            shown = any(_supersedes_stale(cid) for cid in answer.cited)
+            if shown:
+                edges += 1
+            elif live_hit:
+                notes.append(f"no edge {m.label}")
+            if name == "full runtime":
+                served.append((m.label, answer.text or "", answer.tokens))
+        rate = rt.telemetry.report().get("stale_fact_read_rate")
+        if name == "no supersession" and stale > 0:
+            control_fired = True
+        print(f"{name:<24}{corrected:>8}/{n}{stale:>11}/{n}{edges:>9}/{n}"
+              f"{('n/a' if rate is None else f'{rate:.2f}'):>9}   "
+              f"{'; '.join(notes) if notes else '-'}")
+
+    print("-" * len(header))
+    print("'stale k' is the runtime's own stale_fact_read_rate, shown for comparison: it stays\n"
+          "0 even on the row where superseded values are provably served, because disabling\n"
+          "supersession means nothing is ever marked. 'stale served' is ground truth.")
+    print("\nwhat the full runtime served:")
+    for label, text, tokens in served:
+        print(f"  {label:<34} {tokens:>4} tok  {' '.join(text.split())[:88]}")
+    print()
+    print("negative control FIRED: the instrument can distinguish a pass from a no-op."
+          if control_fired else
+          "negative control DID NOT FIRE: this run does not establish that the probe can\n"
+          "detect the failure it tests for.")
