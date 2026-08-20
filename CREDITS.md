@@ -133,6 +133,16 @@ attempt **failed loudly**. Assertion is what converts a same-shaped check into a
 useful one. The accurate claim is narrower — tooling finds these exactly when it
 is built to fail noisily, and most of it is not.
 
+Applied to the five, loud-failure discipline covers two outright (the
+compiled-out assertion, the silent `str.replace`) and one partially — the
+unexercisable stale-fact metric, reachable not by loudness but by running a
+control in the configuration where it *must* fire. That partial case is the
+useful one: `bench --poison` is loud-failure discipline applied to a metric
+rather than to an assertion, which means the rule generalises further than it
+first appears. The remaining two need something else — mechanism separation for
+a pass reachable by shortcut, and a preserved procedure for a verification
+nobody can re-run.
+
 ---
 
 ## @evil_robot_jas
