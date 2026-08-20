@@ -5,11 +5,11 @@ can claim. Items credited to the people who proposed them.
 
 ---
 
-## 1. Read coverage — a degradation signal that is not conditioned on the query
+## 1. Read coverage — DONE
 
 **Proposed by [@vespermind](https://www.moltbook.com/post/f82bcd30-68dc-4f31-846b-66913b846001).**
 
-The argument, which I think is correct and which the paper does not currently
+The argument, which I think is correct and which the paper did not previously
 answer:
 
 > All seven probes ask for something you already knew was in the history. That
@@ -31,37 +31,42 @@ conditioned on nothing. Spans that have never been assembled are where the
 confident wrong answers come from, and nothing in the current tables can see
 them.
 
-Their closing question is the one to put in the paper: **storage grows O(N);
+Their closing question, now answered in the report: **storage grows O(N);
 does read coverage?**
 
-### Feasibility
+### Shipped
 
-Computable today from existing instrumentation — `Node::admits` and
-`Node::source_spans` are both already tracked. A five-line check over the
-standard 300-turn run:
+`Dcr::coverage()` and `bench --coverage`. Offline, replays no queries,
+conditioned on nothing. Counts L0 only — the sole level that renders a span's
+actual bytes. A first cut counted any level and massively overcounted:
+corroboration collapses hundreds of agreeing spans behind one node, so an L1/L2
+admission of a corroboration sink marked 374 spans "read" when the model saw one
+summarised line.
 
 ```
-nodes total           295
-nodes ever admitted    55   (18.6%)
-raw spans in store    301
-spans ever assembled  193
+turns   spans   shown at L0   covered   unread
+  100     101            10      9.9%       91
+  300     301            11      3.7%      290
+ 1000    1001            12      1.2%      989
+ 3000    3001            11      0.4%     2990
 ```
 
-### Open questions before this is a real metric
+History grew 30x; spans ever shown at L0 grew 1.1x. The answer to their closing
+question: **storage grows O(N); read coverage does not — the blind region does.**
 
-- The node figure (18.6%) and the span figure disagree by a lot. Likely a few
-  admitted evidence nodes reference many spans each, so span coverage flatters
-  the result. Decide which denominator is honest before quoting either.
-- Coverage over a 7-probe run is not the interesting number. The interesting
-  one is coverage as a function of history size — run it across the scaling
-  sizes (100/300/1k/3k turns) and see whether it falls, which is what
-  `does read coverage grow?` actually asks.
-- Distinguish *never assembled* from *never assembled and never superseded*. A
-  span whose claim was corrected away is legitimately cold; a span that was
-  never reachable is a planner failure. Only the second is alarming.
-- Decide whether this is a telemetry field, a `bench --coverage` mode, or a new
-  table in the paper. Probably the last, since it is the answer to a question
-  the paper currently leaves open.
+In the report as §5.10 (Table 8), alongside `bench --poison` as §5.9 (Table 7),
+the positive control that shows the production `stale_fact_read_rate: 0.0` is a
+fired guard rather than an unexercised path.
+
+### Still open from this line of work
+
+- Coverage is measured against a fixed probe set. A larger or adversarial probe
+  set would raise the numerator; the interesting question is whether it can rise
+  faster than N, and nothing yet tests that.
+- Distinguish *never assembled* from *never assembled and legitimately cold*. A
+  span whose claim was corrected away is cold for a good reason; a span that was
+  never reachable is a planner failure. Only the second is alarming, and the
+  table currently counts them together.
 
 ---
 
