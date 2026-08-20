@@ -3,6 +3,14 @@
 
     python3 paper/build.py            # -> paper/dcr-bounded-attention.pdf
     python3 paper/build.py --html-only
+    python3 paper/build.py --site ../site   # also writes the published page + PDF
+
+Verifying a deploy: compare the *PDF* checksum against the local artefact, not
+the HTML. Cloudflare rewrites the served HTML in transit — email obfuscation, a
+beacon script, a hidden link — so a raw HTML diff always shows several spurious
+hunks even on a correct deploy; compare visible text if you need to check it.
+Propagation has been observed between 25 s and 210 s, tracking machine load, so
+a mismatch inside the first few minutes is not yet evidence of a failure.
 
 The print PDF and the web version share `paper.frag.html`, so the prose can
 never drift between them.
