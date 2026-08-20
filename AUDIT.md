@@ -162,8 +162,9 @@ code reasons: **N 11 → 10** (two overlapping `Result<_, String>` patterns were
 double-counting one line) and **E**, which now reports lines and matches
 separately.
 
-Current totals: 274 distinct hit lines, 311 raw matches, 106 in gating sections,
-across 30 files and 13,539 lines. Unchanged from the `c17abf5` baseline except
+Totals **at `3821cc5`** (a bare "current" number rots the moment another
+session pushes; three of us were): 274 distinct hit lines, 311 raw matches, 106
+in gating sections, across 30 files and 13,539 lines. Unchanged from the `c17abf5` baseline except
 that one pattern stopped matching: the crate's only `debug_assert_eq!` became a
 real `assert_eq!`, because it guarded Table 4's correctness-equality claim and
 every benchmark runs `--release`, where debug assertions are compiled out. It
