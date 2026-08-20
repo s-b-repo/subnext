@@ -1159,8 +1159,8 @@ fn run_mutation_set(
         set.iter().map(|m| m.references.len()).sum::<usize>()
     );
     let header = format!(
-        "{:<24} {:>10} {:>13} {:>11} {:>9}   {}",
-        "variant", "corrected", "stale served", "edge shown", "stale k", "notes"
+        "{:<24} {:>10} {:>13} {:>11} {:>11}   {}",
+        "variant", "corrected", "stale served", "edge shown", "guard fired", "notes"
     );
     println!("{}", "-".repeat(header.len()));
     println!("{header}");
@@ -1175,7 +1175,7 @@ fn run_mutation_set(
             runtime.ingest(text, Some(doc_id))?;
         }
         let mut reasoner = LocalReasoner::new();
-        let (mut corrected, mut stale, mut edges) = (0usize, 0usize, 0usize);
+        let (mut corrected, mut stale, mut edges, mut guarded) = (0usize, 0usize, 0usize, 0usize);
         let mut stale_cases: Vec<&str> = Vec::new();
         let mut missed: Vec<&str> = Vec::new();
         let mut no_edge: Vec<&str> = Vec::new();
@@ -1200,6 +1200,22 @@ fn run_mutation_set(
             }
             // Can the runtime show *why* the live value wins? A cited node must
             // supersede a node that still carries the stale value.
+            // Was the stale node retrieved and then rejected *by supersession*,
+            // or did it simply never surface? A reviewer's point: a pass can be
+            // correct through an unobserved shortcut and look identical to the
+            // mechanism under test. `stale_seen` is what the planner skipped for
+            // staleness, so it distinguishes "the guard fired" from "the guard
+            // was never reached".
+            let rejected_by_guard = answer.context.stale_seen.iter().any(|idx| {
+                runtime
+                    .graph
+                    .nodes()
+                    .get(usize::from(*idx))
+                    .is_some_and(|n| n.value.to_lowercase().contains(&stale_v))
+            });
+            if rejected_by_guard {
+                guarded += 1;
+            }
             let shown = answer.cited.iter().any(|id| {
                 runtime.graph.get(id).is_some_and(|node| {
                     node.meta.supersedes.iter().any(|old| {
@@ -1231,12 +1247,12 @@ fn run_mutation_set(
             control_fired = true;
         }
         println!(
-            "{:<24} {:>8}/{n} {:>11}/{n} {:>9}/{n} {:>9}   {}",
+            "{:<24} {:>8}/{n} {:>11}/{n} {:>9}/{n} {:>9}/{n}   {}",
             variant.name,
             corrected,
             stale,
             edges,
-            marked,
+            guarded,
             {
                 let mut notes = Vec::new();
                 for c in &stale_cases {
