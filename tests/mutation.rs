@@ -92,3 +92,47 @@ fn ground_truth_values_are_distinguishable() {
         );
     }
 }
+
+#[test]
+fn a_coordinated_restatement_carries_the_subject() {
+    use dcr::indexer::HeuristicExtractor;
+    let ex = HeuristicExtractor::default();
+    // "was <participle> and is now <value>" — the subject carries across the
+    // conjunction, so the live value is the one after "is now", not the
+    // participle. Both the bare and the "Correction:"-prefixed forms must
+    // agree, because the prefix sends the parse down a different path.
+    for text in [
+        "The primary datastore was migrated and is now postgres-15 on host db-omega.",
+        "Correction: the primary datastore was migrated and is now postgres-15 on host db-omega.",
+    ] {
+        let claims: Vec<_> = ex
+            .extract(text)
+            .into_iter()
+            .filter(|p| p.key.as_deref() == Some("primary.datastore"))
+            .collect();
+        assert_eq!(
+            claims.len(),
+            1,
+            "{text:?} produced {} claims on one key: {:?}",
+            claims.len(),
+            claims.iter().map(|c| &c.value).collect::<Vec<_>>()
+        );
+        assert!(
+            claims[0].value.contains("postgres-15"),
+            "{text:?} extracted {:?}, expected the value after \"is now\"",
+            claims[0].value
+        );
+    }
+}
+
+#[test]
+fn a_fronted_adverb_is_not_part_of_the_value() {
+    use dcr::indexer::HeuristicExtractor;
+    let ex = HeuristicExtractor::default();
+    let claims = ex.extract("The failover region is now eu-central-1.");
+    let c = claims
+        .iter()
+        .find(|p| p.key.as_deref() == Some("failover.region"))
+        .expect("claim on failover.region");
+    assert_eq!(c.value, "eu-central-1", "the adverb leaked into the value");
+}

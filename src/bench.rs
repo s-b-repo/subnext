@@ -944,6 +944,7 @@ pub fn run_mutation_probe(turns: usize, budget: usize) -> Result<(), DcrError> {
         let (mut corrected, mut stale, mut edges) = (0usize, 0usize, 0usize);
         let mut stale_cases: Vec<&str> = Vec::new();
         let mut missed: Vec<&str> = Vec::new();
+        let mut no_edge: Vec<&str> = Vec::new();
 
         for m in MUTATIONS {
             let answer = runtime.ask_with(m.query, None, &mut reasoner);
@@ -977,6 +978,10 @@ pub fn run_mutation_probe(turns: usize, budget: usize) -> Result<(), DcrError> {
             });
             if shown {
                 edges += 1;
+            } else if text.contains(&live_v) {
+                // Served the right value but cannot point at the edge that
+                // justifies it — a provenance gap, not a retrieval one.
+                no_edge.push(m.label);
             }
             if variant.name == "full runtime" {
                 served.push((m.label, answer.text.clone(), answer.tokens));
@@ -1005,6 +1010,9 @@ pub fn run_mutation_probe(turns: usize, budget: usize) -> Result<(), DcrError> {
                 }
                 for c in &missed {
                     notes.push(format!("no answer {c}"));
+                }
+                for c in &no_edge {
+                    notes.push(format!("no edge {c}"));
                 }
                 if notes.is_empty() {
                     "-".to_string()

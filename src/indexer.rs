@@ -255,20 +255,29 @@ impl HeuristicExtractor {
             let key = normalise_key(&key_raw);
             let mut value = clean_value(raw_value).to_string();
             let mut consumed = value_end;
-            if depth == 0 {
-                if let Some((restated, end)) =
-                    restatement_after(text, value_end, self.max_value_chars)
-                {
-                    value = restated;
-                    consumed = end;
-                }
+            // Applies at every depth: corrections reach here at depth 1, after
+            // descending through the "Correction:" prefix, which is exactly the
+            // case this rule exists for.
+            if let Some((restated, end)) =
+                restatement_after(text, value_end, self.max_value_chars)
+            {
+                value = restated;
+                consumed = end;
             }
             if key.is_empty() || value.is_empty() {
                 continue;
             }
             if NOISE_KEYS.contains(&key.as_str()) {
                 if depth == 0 {
-                    out.extend(self.assignments(raw_value, depth + 1));
+                    // `clause_end` stops at the conjunction, so a structural
+                    // prefix ("Correction: ...") would hand the inner parse a
+                    // slice truncated before a coordinated restatement — it
+                    // would see "was migrated" and never "is now postgres-15".
+                    // Widen the slice to whatever the restatement consumes.
+                    let end = restatement_after(text, value_end, self.max_value_chars)
+                        .map(|(_, e)| e)
+                        .unwrap_or(value_end);
+                    out.extend(self.assignments(text[after_ws..end].trim_end(), depth + 1));
                 }
                 continue;
             }
