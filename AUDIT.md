@@ -72,7 +72,7 @@ credential — `secret`, `token` or `password` — a value printed by `{:?}`.
 All seven are token *counts*, not secrets — `Allocation` (`budget.rs:82`),
 `ActiveContext` (`planner.rs:170`), `Answer` (`runtime.rs:39`), `RebuildReport`
 (`runtime.rs:1137`), `Turn` (`telemetry.rs:15`), `Report` (`telemetry.rs:105`)
-and `Telemetry` (`telemetry.rs:29`). This crate counts tokens in the
+and `Telemetry` (`telemetry.rs:29`). `Telemetry` joined the list only when the pattern widened to compound names: the narrow `\b` had hidden its `history_tokens` field, so the earlier count of six was not merely short but *unknowingly* short — the pattern was concealing a member of the very set it was meant to enumerate. This crate counts tokens in the
 language-model sense on nearly every struct that crosses the planner, so rather
 than carry seven permanent false positives, each is waived in `src/` by
 `// audit-allow: LM token count, not a credential` on the count field, and

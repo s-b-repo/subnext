@@ -1,11 +1,21 @@
-// Fixture for the section-P self-test in scripts/audit-selftest.sh.
+// Fixtures for the section-P self-test in scripts/audit-selftest.sh.
 //
-// This file is NOT under src/, so it is never compiled and never scanned by the
-// real gate. It exists solely so the self-test can prove section P still FIRES:
-// the struct below derives `Debug` over a bare `secret` field, exactly the shape
-// that leaked InsecureDevSigner's signing key. If the audit ever stops flagging
-// this, the gate has silently broken — the defect this repo keeps re-finding.
+// NOT under src/, so never compiled and never scanned by the real gate. Each
+// struct isolates one credential-field form the gate MUST catch; the self-test
+// asserts ALL of them fire, so a regression in either the bare match or the
+// compound (underscore) alternation drops the count and fails the build. A
+// gate that only ever passes is indistinguishable from one whose regex rotted.
 #[derive(Debug)]
-pub struct LeakyFixture {
+pub struct BareSecret {
     secret: String,
+}
+
+#[derive(Debug)]
+pub struct CompoundToken {
+    access_token: String,
+}
+
+#[derive(Debug)]
+pub struct CompoundSecret {
+    client_secret: String,
 }
