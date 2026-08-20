@@ -85,18 +85,34 @@ retrieval paths agree rested on a `debug_assert_eq!`, and every benchmark here
 runs `--release`, where debug assertions are compiled out. The check read as
 correct and never executed in the command that produced the table.
 
-Counting the reviewer's original argument about `stale_fact_read_rate`, the
-phantom node behind `edge shown`, and this, the same defect has now been found
-three times in this repository: a control wired so that it cannot fail, placed
-inside the result it guards. It is the failure this project is least able to see
-on its own, because in every case the artefact looks exactly like a working one.
+The same defect has now been found **four** times in this repository: a control
+wired so that it cannot fail, placed inside the result it guards. The reviewer's
+original argument about `stale_fact_read_rate`; the phantom node behind `edge
+shown`; the `debug_assert_eq!` above; and then the verification of that fix —
+which was done by forcing the approximate path to diverge and watching the
+benchmark abort, correctly, but kept no record a reader could reproduce, so the
+paper briefly claimed a verification that had to be taken on word. That is the
+same failure the class is about, committed while fixing an instance of it.
+
+The general form, which is the durable part: **verifying a control means making
+it fail on purpose.** Confirming that it passes is precisely what every broken
+version already did. `RESULTS.md` now carries the three-line procedure rather
+than the conclusion.
+
+It is the failure this project is least able to see on its own, because in every
+case the artefact looks exactly like a working one.
 
 **Landed.** `3821cc5`, `7a89511`.
 
 **Disputed / open.** Policy version is not in the receipt. Their point is
-answered for the supersession guard and for the ANN equality check, not in
-general — nothing systematically audits this codebase for assertions that cannot
-fire, and the two found so far were found by argument rather than by tooling.
+answered for the supersession guard and the ANN equality check, not in general.
+Exactly one of the four instances has a mechanical form — `debug_assert` in a
+path that only runs under `--release` is always wrong and always greppable, and
+is proposed as an audit pattern. The other two shapes, a metric unexercisable in
+the configuration that disables it and a pass reachable through an unobserved
+shortcut, have no mechanical form and were found by argument. How many remain is
+unknown, and the paper's threats section now says so rather than implying the
+problem is closed.
 
 ---
 
