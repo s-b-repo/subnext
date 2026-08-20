@@ -50,21 +50,36 @@ conditioned even though the denominator is not.
 tested on facts with no accumulated weight, and the probe conflated *the
 supersession edge existing* with *the supersession edge winning*.
 
-**Artifact changed.** `bench --mutate` in both implementations: four facts
+**Artifact changed.** `bench --mutate`: four facts
 established early, referenced twelve times across the first 60% of history, then
 superseded at 85%, measured against corpus ground truth rather than the
-runtime's own marking. `tests/mutation.rs`, `tests/test_mutation.py`. Its first
+runtime's own marking. `tests/mutation.rs`. Its first
 run surfaced a fact-extraction bug — `"was migrated and is now postgres-15"`
 extracting `migrated` — which had planted a phantom node mid-chain in the
 supersession graph.
 
 **Landed.** `a5ba00f`, `dea43e2`, `072092c`.
 
-**Disputed / open.** Their adversarial variant — make the stale node lexically
-*closer* to the query than the correction — is **not built**. Until it is, the
-reported 4/4 is consistent with the planner respecting the supersession edge and
-equally consistent with it retrieving the newer text because nothing contested
-it. [`TODO.md`](TODO.md) item 2.
+**Second claim changed.** Their adversarial variant — make the stale node
+lexically *closer* than the correction — exposed a hole the plain set could not
+see. Built (`ADVERSARIAL`, verified at 5 query terms against 2 rather than
+assumed), it failed **0/4**: supersession excluded the superseded *claim*, while
+the evidence node sourcing it stayed live and carried the old value into the
+window under a "do not treat as current" note — a guard only against a model
+that reads notes. Fixed by excluding evidence whose every live dependent has been
+superseded from seeding. Now 4/4 with supersession, 0/4 without.
+
+**Third claim changed.** That the 4/4 was attributable. It was not: nothing
+distinguished "the guard rejected the stale node" from "the stale node never
+surfaced". The planner already recorded it in `stale_seen` and had never
+surfaced it. The receipt now carries a guard-fired column — 4/4 full runtime,
+0/4 without supersession.
+
+**Landed.** `1ff91f6`, `c17abf5`.
+
+**Disputed / open.** Policy version is not in the receipt. Their point that a
+pass can be correct through an unobserved shortcut is answered for the
+supersession guard and not in general.
 
 ---
 
@@ -76,13 +91,20 @@ rendered alongside the thing that makes it matter". 100% span coverage can still
 miss a failure that needs A and B in scope simultaneously, so the reported 0.4%
 is a ceiling on the good news rather than a floor.
 
-**Artifact changed.** None yet. [`TODO.md`](TODO.md) item 3, filed with the
-tractable form: restrict the denominator to pairs the graph already links by a
-dependency edge — `O(edges)` rather than `O(N²)` — which is the set where
-co-occurrence is load-bearing.
+**Artifact changed.** `Dcr::pair_coverage()`, reported by `bench --coverage`.
+Denominator is span pairs joined by a dependency edge — `O(edges)` rather than
+`O(N²)` — which is where co-occurrence is load-bearing and is a map the graph
+already holds.
 
-**Disputed / open.** Accepted in full; not yet built. Bounds a result already
-published, which is the reason it sits above the other open items.
+**Landed.** `1ff91f6`.
+
+**Result.** Pair coverage collapses faster than single-span coverage, 4.5% →
+0.0%, while linked pairs grow 331 → 417,388. The one-dimensional figure was the
+optimistic view, exactly as argued.
+
+**Disputed / open.** The numerator is still conditioned on a fixed probe set. A
+larger or adversarial set would raise it, and nothing yet tests whether it can
+rise faster than N.
 
 ---
 
@@ -93,11 +115,18 @@ needs cases that change the condition under test while preserving the tempting
 retrieval path, or a clean score only proves the probe never asked the archive to
 lose.
 
-**Artifact changed.** None directly. Adopted as the framing for
-[`TODO.md`](TODO.md) item 2 and as a standing check on the whole suite rather
-than one probe.
+**Artifact changed.** Adopted as a standing check, and it immediately caught a
+live defect — in the fix for @umiXBT's item, not in the original code. The first
+adversarial set was not adversarial: token overlap is a set intersection, so
+repeating terms in the stale line did not raise its score and both sides tied at
+2. A counterexample set that could not produce a counterexample, written directly
+beneath a comment quoting this rule. `tests/multihop.rs` and the mutation tests
+now assert the construction holds rather than trusting it.
 
-**Disputed / open.** Nothing disputed. The rule is not yet enforced anywhere.
+**Landed.** `1ff91f6`, `9126797`.
+
+**Disputed / open.** Nothing disputed. The rule is enforced by assertion on two
+probe sets, not across the whole suite.
 
 ---
 
@@ -107,10 +136,19 @@ than one probe.
 It is not, and they independently reproduced the linear retrieval scaling on a
 1.5k-node graph over a vector store.
 
-**Artifact changed.** None yet. [`TODO.md`](TODO.md) item 5 — a recency
-prefilter ahead of the linear scan, filed with the A/B that would falsify it,
-since "half the latency at no accuracy cost" is exactly the trade that fails
-quietly on the probes reaching furthest back.
+**Artifact changed.** `RelevancePlanner::recency_cutoff` and `bench --decay`,
+with the A/B that would falsify it. Default off.
+
+**Landed.** `90ae196`.
+
+**Result.** The latency win reproduces — 1.67ms → 1.12ms at 300 turns. "No
+accuracy cost" does not: a 0.25 cutoff gives 5/7 and breaks exactly the two
+probes predicted for it, `old fact, never repeated` and `detail buried in a long
+span`. Correctness is also non-monotonic in the cutoff, recovering to 7/7 at
+0.75 — and that recovery is the seed fallback firing rather than the filter
+succeeding, so the best-looking row is the one where the mechanism under test has
+been bypassed. Seed counts are in the table so this is visible rather than
+inferred.
 
 **Disputed / open.** Their suggestion that a sliding window may beat a full
 graph in some regime is **not conceded and not tested.** It is an argument that
@@ -128,10 +166,15 @@ scorer checking completion rather than grounding passes a fluent answer with no
 grounding at all. monty_cmr10_research measured 34 of 41 fallback-triggered
 turns scoring correct with zero grounding in source facts.
 
-**Artifact changed.** None yet. [`TODO.md`](TODO.md) item 4 — make correctness
-conditional on `audit_path_completeness`, which is already recorded per run and
-has never been allowed to fail a probe. Expected to be a no-op on honest runs,
-which is the point.
+**Artifact changed.** Correctness in `run_benchmark` is now conditional on a
+complete audit path to raw spans, not substring containment alone, and the gate
+reports its outcome either way. The `explain()` call it needed was already there
+and its result discarded.
+
+**Landed.** `1ff91f6`.
+
+**Result.** A no-op on honest runs — 0 of 7 answers matched without grounding —
+which is what a tripwire should be until it is not.
 
 **Disputed / open.** miacollective's low-entropy fallback watermark does not
 port here — there is no fallback path, a probe either resolves to spans or

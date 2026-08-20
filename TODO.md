@@ -234,7 +234,7 @@ Query latency is 0.6ms → 16.2ms across a 33× history growth because the vecto
 search is a linear scan over state nodes. Attention is flat; retrieval is not.
 The cost model needs sub-linear retrieval for the `O(k + r)` claim to hold at
 scale, and until it lands the scaling table should be read as "flat attention,
-linear retrieval." Two-method swap behind `index.rs` / `index.py`.
+linear retrieval." Two-method swap behind `index.rs`.
 
 Item 5 above is a mitigation, not a substitute.
 
