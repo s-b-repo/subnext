@@ -155,7 +155,7 @@ implementation actually reaches.
 
 ### Tests
 
-134 Rust tests across 15 binaries; 78 Python tests. They encode the invariants as
+140 Rust tests across 15 binaries; 78 Python tests. They encode the invariants as
 executable claims: an unsourced fact is rejected, a superseded node stays in the
 graph, a stale node never enters a plan, the knapsack never exceeds its budget
 and matches a brute-force optimum on small instances, and the working set stays
