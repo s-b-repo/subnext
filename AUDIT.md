@@ -162,9 +162,12 @@ code reasons: **N 11 → 10** (two overlapping `Result<_, String>` patterns were
 double-counting one line) and **E**, which now reports lines and matches
 separately.
 
-Totals **at `3821cc5`** (a bare "current" number rots the moment another
-session pushes; three of us were): 274 distinct hit lines, 311 raw matches, 106
-in gating sections, across 30 files and 13,539 lines. Unchanged from the `c17abf5` baseline except
+Totals **at code `3821cc5` with the pre-broadening tool**: 274 distinct hit
+lines, 311 raw matches, 106 in gating sections, across 30 files and 13,539
+lines. A number here has two rulers — the code and the matrix. Section P was
+later widened to catch compound credential names, so re-running today's tool at
+`3821cc5` will not reproduce 274; pin both axes or the figure is not
+reproducible, and a bare "current" rots the moment any of the three of us push. Unchanged from the `c17abf5` baseline except
 that one pattern stopped matching: the crate's only `debug_assert_eq!` became a
 real `assert_eq!`, because it guarded Table 4's correctness-equality claim and
 every benchmark runs `--release`, where debug assertions are compiled out. It
