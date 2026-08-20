@@ -122,7 +122,7 @@ FIGURE_ARCH
 
 <p><strong>Cost.</strong> The knapsack is <span class="m">O(n · B/q)</span> for <span class="m">n</span> candidates, budget <span class="m">B</span>, and quantum <span class="m">q</span> chosen to keep <span class="m">B/q</span> at a fixed 400. Lexical retrieval is sub-linear through an inverted index; vector retrieval is a linear scan over state nodes, which is the implementation's most consequential shortcut and is examined in §6.</p>
 
-<p>The implementation ships 75 tests. They encode the invariants as executable claims — that an unsourced fact is rejected, that a superseded node stays in the graph, that a stale node never enters a plan, that disabling supersession makes the mutation probe's negative control fail rather than silently pass, that the knapsack never exceeds its budget and matches a brute-force optimum on small instances, and that the working set stays bounded as history grows.</p>
+<p>The implementation ships 79 tests. They encode the invariants as executable claims — that an unsourced fact is rejected, that a superseded node stays in the graph, that a stale node never enters a plan, that disabling supersession makes the mutation probe's negative control fail rather than silently pass, that the knapsack never exceeds its budget and matches a brute-force optimum on small instances, and that the working set stays bounded as history grows.</p>
 
 <h2 id="s5">5&ensp;Evaluation</h2>
 
@@ -311,7 +311,7 @@ cargo run --release -- bench --ablate             # Table 6
 cargo run --release -- bench --poison             # Table 7 (stale-fact control)
 cargo run --release -- bench --coverage           # Table 8 (read coverage)
 cargo run --release -- bench --mutate             # Table 7
-cargo test                                        # 75 tests</pre>
+cargo test                                        # 79 tests</pre>
 
 <h2 id="refs">References</h2>
 <ol class="refs">
