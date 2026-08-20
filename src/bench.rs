@@ -23,6 +23,7 @@ use crate::runtime::Dcr;
 use crate::text::content_tokens;
 use crate::tokens::estimate_tokens;
 
+#[derive(Clone)]
 pub struct Probe {
     pub query: &'static str,
     pub expected: &'static str,
@@ -1739,4 +1740,153 @@ pub fn build_adversarial_corpus(turns: usize) -> Corpus {
         ),
     ];
     Corpus { docs, probes }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-hop probes
+// ---------------------------------------------------------------------------
+
+/// A probe whose answer is never stated beside the thing the query names.
+///
+/// The ablation shows graph expansion costs 46% of the working set and loses
+/// nothing on the standard corpus, and reference linking has no effect at all.
+/// Two readings fit that: the mechanisms are not load-bearing, or the corpus
+/// never asks for a join. The standard probes cannot separate them, because
+/// every answer sits in a document that also names the subject.
+///
+/// These do not. Each answer requires following a dependency edge from the term
+/// the query uses to a term it never mentions, so a planner that cannot expand
+/// along edges has to miss them.
+pub const MULTI_HOP: &[Probe] = &[
+    // Scored on the assembled context, not the answer. The harness reasoner is
+    // a line-matcher and cannot chain A->B->C by construction, so scoring its
+    // output would measure the stand-in model rather than whether the planner
+    // brought the joining material into the window — which is the question.
+    //
+    // The construction matters more than the count. In a first attempt every
+    // query named terms from both ends of its chain, so both facts were reachable
+    // by direct lexical hit and no join was ever required — the probes passed
+    // with graph expansion switched off, which proved nothing. Here the
+    // second-hop fact shares no content token with the query at all
+    // (`the_second_hop_is_lexically_unreachable` pins that), so the only route
+    // to it is the edge from the first.
+    Probe::assembled(
+        "who should be paged for the readiness probe failures?",
+        "team-payments",
+        "owner via failing service (2 hops)",
+    ),
+    Probe::assembled(
+        "is there capacity risk for checkout reads?",
+        "61 percent",
+        "disk via host via service (2 hops)",
+    ),
+    Probe::assembled(
+        "what blocks build 4471?",
+        "rule 37",
+        "rule via subnet via build (2 hops)",
+    ),
+];
+
+/// Facts for [`MULTI_HOP`], each stating exactly one link in a chain. The
+/// first fact of each chain is lexically reachable from its query; the second
+/// is not, and is reachable only by following the link.
+const HOP_FACTS: &[&str] = &[
+    "The readiness probe failures were traced to alpha-checkout.",
+    "alpha-checkout is owned by team-payments.",
+    "Checkout reads are served by host db-alpha.",
+    "db-alpha disk headroom is 61 percent.",
+    "Build 4471 serves the checkout subnet.",
+    "Firewall rule 37 drops traffic to the checkout subnet.",
+];
+
+pub fn build_multi_hop_corpus(turns: usize) -> Corpus {
+    let mut docs: Vec<(String, String)> = Vec::new();
+    for (i, fact) in HOP_FACTS.iter().enumerate() {
+        docs.push((format!("h{i:02}"), (*fact).to_string()));
+    }
+    let fixed = docs.len();
+    for i in fixed..turns.max(fixed + 1) {
+        docs.push((
+            format!("t{i:03}"),
+            NOISE[i % NOISE.len()].replace("{n}", &i.to_string()),
+        ));
+    }
+    Corpus {
+        docs,
+        probes: MULTI_HOP.to_vec(),
+    }
+}
+
+/// Does graph expansion buy anything when the answer needs a join?
+pub fn run_multi_hop(turns: usize, budget: usize) -> Result<(), DcrError> {
+    struct Variant {
+        name: &'static str,
+        apply: fn(&mut Dcr),
+    }
+    let variants = [
+        Variant {
+            name: "full runtime",
+            apply: |_| {},
+        },
+        Variant {
+            name: "no graph expansion",
+            apply: |rt| rt.planner.max_depth = 0,
+        },
+        Variant {
+            name: "no reference linking",
+            apply: |rt| rt.indexer.reference_linking = false,
+        },
+    ];
+    let corpus = build_multi_hop_corpus(turns);
+    println!(
+        "MULTI-HOP - {turns} turns, {} tokens of history, B_attention = {budget}",
+        estimate_tokens(&corpus.text())
+    );
+    println!(
+        "{} probes whose answer is never stated beside the term the query uses",
+        corpus.probes.len()
+    );
+    let header = format!(
+        "{:<24} {:>9} {:>9}   {}",
+        "variant", "correct", "mean k", "probes that fail"
+    );
+    println!("{}", "-".repeat(header.len()));
+    println!("{header}");
+    println!("{}", "-".repeat(header.len()));
+    for variant in variants {
+        let mut runtime = Dcr::new(budget);
+        (variant.apply)(&mut runtime);
+        for (doc_id, text) in &corpus.docs {
+            runtime.ingest(text, Some(doc_id))?;
+        }
+        let mut reasoner = LocalReasoner::new();
+        let (mut correct, mut failed) = (0usize, Vec::new());
+        for probe in &corpus.probes {
+            let answer = runtime.ask_with(probe.query, None, &mut reasoner);
+            let scored_on = if probe.on_context {
+                answer.context.render()
+            } else {
+                answer.text.clone()
+            };
+            if probe.scores(&scored_on) {
+                correct += 1;
+            } else {
+                failed.push(probe.label);
+            }
+        }
+        println!(
+            "{:<24} {:>7}/{} {:>9.1}   {}",
+            variant.name,
+            correct,
+            corpus.probes.len(),
+            runtime.telemetry.report().tokens_per_query_mean,
+            if failed.is_empty() {
+                "-".to_string()
+            } else {
+                failed.join("; ")
+            }
+        );
+    }
+    println!("{}", "-".repeat(header.len()));
+    Ok(())
 }

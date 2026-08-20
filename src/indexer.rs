@@ -24,7 +24,7 @@ use crate::graph::{DcrError, MemoryGraph};
 use crate::ids::Clock;
 use crate::index::HybridIndex;
 use crate::ladder::Ladder;
-use crate::nodes::{Kind, NewNode, Node, NodeIdx, NodeMeta, Status};
+use crate::nodes::{EdgeType, Kind, NewNode, Node, NodeIdx, NodeMeta, Status};
 use crate::spans::{RawStore, SpanIdx};
 use crate::text::{contains_any, is_word_char, strip_quotes};
 
@@ -717,6 +717,9 @@ impl StateIndexer {
         let conflicts = self.conflicts(ctx.graph, &node);
         let idx = ctx.graph.upsert(node, ctx.raw, ctx.clock)?;
         self.reindex(ctx, idx);
+        if self.reference_linking {
+            self.backfill_references(ctx, idx);
+        }
 
         for other in conflicts {
             ctx.graph.contradict(idx, other);
@@ -807,6 +810,55 @@ impl StateIndexer {
             .collect()
     }
 
+    /// Link *existing* facts to a newly arrived one they already mention.
+    ///
+    /// [`Self::reference_links`] only looks backwards, at nodes that exist when
+    /// a node arrives. A chain written the way people write one — "failures were
+    /// traced to alpha-checkout", and only later "alpha-checkout is owned by
+    /// team-payments" — puts the mention *before* the thing mentioned, so the
+    /// backward pass can never see it and the chain is never joined. Without
+    /// this the graph stays a star however good the planner is, and a probe
+    /// needing two hops fails with graph expansion switched on or off, which is
+    /// exactly what the multi-hop set showed.
+    fn backfill_references(&self, ctx: &mut IngestCtx<'_>, new_idx: NodeIdx) {
+        let new_node = ctx.graph.node(new_idx);
+        if new_node.kind != Kind::Claim {
+            return;
+        }
+        let new_id = new_node.id.clone();
+        let Some(key) = new_node.key.clone() else {
+            return;
+        };
+        let key = key.to_lowercase();
+        let key_spaced = key.replace('.', " ");
+        let mut needles: Vec<&str> = vec![key.as_str(), key_spaced.as_str()];
+        needles.retain(|n| n.chars().count() >= 4);
+        if needles.is_empty() {
+            return;
+        }
+        let mentioners: Vec<NodeIdx> = ctx
+            .graph
+            .nodes()
+            .iter()
+            .enumerate()
+            .filter(|(_, other)| {
+                other.kind == Kind::Claim
+                    && other.status == Status::Fresh
+                    && other.id != new_id
+                    && !other.dependencies.contains(&new_id)
+                    && {
+                        let hay = other.value.to_lowercase();
+                        needles.iter().any(|n| hay.contains(n))
+                    }
+            })
+            .map(|(i, _)| NodeIdx::from(i))
+            .collect();
+        for m in mentioners {
+            ctx.graph.add_edge(m, new_idx, EdgeType::DerivedFrom);
+            ctx.graph.node_mut(m).dependencies.push(new_id.clone());
+        }
+    }
+
     /// Link a new node to the live facts it mentions by value.
     ///
     /// Without this the graph is a star — every node hanging off its own
@@ -822,11 +874,24 @@ impl StateIndexer {
             if node.source_spans.iter().any(|s| s == span_id) {
                 continue;
             }
-            let needle = node.value.to_lowercase();
-            let needle = needle.trim();
-            if needle.chars().count() < 4 || !haystack.contains(needle) {
+            // Match the referenced node's value *or* its subject key. Only the
+            // value was tried before, which meant a chain written the way people
+            // actually write one — "failures were traced to alpha-checkout",
+            // then "alpha-checkout is owned by team-payments" — was never
+            // linked: the mention is of the second node's key, not its value.
+            // That is why the ablation reported reference linking as having no
+            // effect. It was not weak, it was unreachable.
+            let value = node.value.to_lowercase();
+            let key = node.key.clone().unwrap_or_default().to_lowercase();
+            let key_spaced = key.replace('.', " ");
+            let needle = [value.trim(), key.trim(), key_spaced.trim()]
+                .into_iter()
+                .filter(|n| n.chars().count() >= 4 && haystack.contains(n))
+                // Longest wins: prefer the most specific mention.
+                .max_by_key(|n| n.len());
+            let Some(needle) = needle else {
                 continue;
-            }
+            };
             matches.push((needle.len(), node.id.clone()));
         }
         matches.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
