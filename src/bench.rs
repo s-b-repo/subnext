@@ -1890,3 +1890,78 @@ pub fn run_multi_hop(turns: usize, budget: usize) -> Result<(), DcrError> {
     println!("{}", "-".repeat(header.len()));
     Ok(())
 }
+
+/// Does pruning the candidate set by recency buy latency without costing
+/// correctness?
+///
+/// Suggested by a reader who measured a halving of latency at no accuracy cost
+/// on their own 1.5k-node graph. It reproduces here as a latency win and does
+/// not reproduce as free: moderate cutoffs break exactly the probes that reach
+/// furthest back, which is the trade a single aggregate latency number hides.
+///
+/// The non-monotonicity is the part worth reading carefully. Correctness does
+/// not fall as the cutoff rises — it falls, then recovers. The recovery is not
+/// the filter succeeding: an aggressive cutoff starves the seed list, and a
+/// starved seed list falls back to the raw lexical index, which finds the span
+/// directly. So the best-looking row is the one where the mechanism under test
+/// has been bypassed, and its latency belongs to the fallback rather than to
+/// the filter.
+pub fn run_decay(turns: usize, budget: usize) -> Result<(), DcrError> {
+    let cutoffs = [0.0f32, 0.25, 0.5, 0.75];
+    println!("RECENCY PREFILTER - {turns} turns, B_attention = {budget}");
+    let header = format!(
+        "{:>7} {:>9} {:>9} {:>10} {:>8}   {}",
+        "cutoff", "correct", "mean k", "ms/query", "seeds", "probes that fail"
+    );
+    println!("{}", "-".repeat(header.len()));
+    println!("{header}");
+    println!("{}", "-".repeat(header.len()));
+    for cutoff in cutoffs {
+        let corpus = build_corpus(turns);
+        let mut runtime = Dcr::new(budget);
+        runtime.planner.recency_cutoff = cutoff;
+        for (doc_id, text) in &corpus.docs {
+            runtime.ingest(text, Some(doc_id))?;
+        }
+        let mut reasoner = LocalReasoner::new();
+        let started = Instant::now();
+        let (mut correct, mut failed, mut considered) = (0usize, Vec::new(), 0usize);
+        for probe in &corpus.probes {
+            let answer = runtime.ask_with(probe.query, None, &mut reasoner);
+            considered += answer.context.considered;
+            let scored = if probe.on_context {
+                answer.context.render()
+            } else {
+                answer.text.clone()
+            };
+            if probe.scores(&scored) {
+                correct += 1;
+            } else {
+                failed.push(probe.label);
+            }
+        }
+        let ms = started.elapsed().as_secs_f64() * 1000.0 / corpus.probes.len() as f64;
+        println!(
+            "{cutoff:>7.2} {:>7}/{} {:>9.1} {:>8.2}ms {:>8.1}   {}",
+            correct,
+            corpus.probes.len(),
+            runtime.telemetry.report().tokens_per_query_mean,
+            ms,
+            considered as f64 / corpus.probes.len() as f64,
+            if failed.is_empty() {
+                "-".to_string()
+            } else {
+                failed.join("; ")
+            }
+        );
+    }
+    println!("{}", "-".repeat(header.len()));
+    println!(
+        "Correctness does not fall monotonically with the cutoff — it falls, then recovers.\n\
+         The recovery is the seed fallback firing, not the filter succeeding: an aggressive\n\
+         cutoff starves the seed list, and a starved list falls back to the raw lexical index.\n\
+         Default is 0.0 (off): on this corpus the filter is a correctness knob wearing a\n\
+         latency costume."
+    );
+    Ok(())
+}

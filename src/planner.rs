@@ -281,6 +281,16 @@ pub struct RelevancePlanner {
     /// exactly the cheap-but-useless material a utility-per-token optimiser is
     /// happy to pack the window with.
     pub seed_min_ratio: f32,
+    /// Drop candidates older than this fraction of the store's age span before
+    /// scoring, rather than scoring everything.
+    ///
+    /// Suggested by a reader who measured a halving of latency at no accuracy
+    /// cost on a 1.5k-node graph over a vector store. `0.0` disables it, which
+    /// is the default — the trade is real but it is a correctness knob wearing a
+    /// latency costume, and the probes it should break first are exactly the
+    /// ones that reach furthest back: `old fact, never repeated` and
+    /// `corrected fact (mid-history)`.
+    pub recency_cutoff: f32,
     /// Negative control only. When true, stale nodes are planned as if fresh
     /// instead of being skipped — used to prove `stale_fact_read_rate` can
     /// return nonzero, so that a zero in production is a fired guard rather
@@ -298,6 +308,7 @@ impl Default for RelevancePlanner {
             max_fanout: 6,
             max_candidates: 120,
             seed_min_ratio: 0.3,
+            recency_cutoff: 0.0,
             admit_stale: false,
         }
     }
@@ -435,8 +446,27 @@ impl RelevancePlanner {
             hits.retain(|(_, score)| *score >= floor);
         }
         let mut seeds: Vec<(NodeIdx, f32)> = Vec::new();
+        // Recency prefilter, off by default. Applied before scoring so it is a
+        // cost saving rather than a re-ranking: anything older than the cutoff
+        // never reaches the utility function at all.
+        let age_floor = if self.recency_cutoff > 0.0 {
+            let stamps: Vec<u64> = ctx.graph.nodes().iter().map(|n| n.timestamp).collect();
+            match (stamps.iter().min(), stamps.iter().max()) {
+                (Some(&lo), Some(&hi)) if hi > lo => {
+                    Some(lo + ((hi - lo) as f32 * self.recency_cutoff) as u64)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         for (idx, score) in hits {
             let node = ctx.graph.node(idx);
+            if let Some(floor) = age_floor {
+                if node.timestamp < floor {
+                    continue;
+                }
+            }
             // Evidence whose every live dependent has been superseded supports
             // nothing current, and it still carries the old value verbatim. It
             // used to be admitted with a NOTE telling the model not to treat it

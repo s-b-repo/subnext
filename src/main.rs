@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use dcr::bench::{
-    run_ablation, run_baselines, run_benchmark, run_coverage, run_multi_hop, run_mutation_probe,
+    run_ablation, run_baselines, run_benchmark, run_coverage, run_decay, run_multi_hop, run_mutation_probe,
     run_poison,
     run_rebuild, run_scaling, run_sweep, run_tamper,
 };
@@ -50,6 +50,7 @@ commands:
         --ablate              which mechanism carries which probe?
         --mutate              is a correction served once the original has dependents?
         --multihop            does graph expansion buy anything when a join is needed?
+        --decay               does a recency prefilter buy latency without costing recall?
         --sweep               correctness and cost against B_attention
         --coverage            read coverage as history grows (offline dual)
         --poison              positive control: can stale_fact_read_rate fire?
@@ -375,6 +376,8 @@ fn run() -> Result<(), String> {
             let has = |name: &str| args.flags.iter().any(|f| f == name);
             if has("--scaling") {
                 run_scaling(&[100, 300, 1000, 3000], args.budget).map_err(to_err)?;
+            } else if has("--decay") {
+                run_decay(args.turns, args.budget).map_err(to_err)?;
             } else if has("--multihop") {
                 run_multi_hop(args.turns, args.budget).map_err(to_err)?;
             } else if has("--mutate") {
