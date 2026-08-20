@@ -244,12 +244,27 @@ git worktree add /tmp/ctl HEAD          # never sabotage the working tree
 cargo run --release -- bench --scaling  # must abort, naming both figures
 ```
 
-**It is not automated.** Three controls in this repository have turned out to be
-unable to fire, and all three were found by someone arguing about them rather
-than by a tool. That is not a method that reliably finds the fourth. A narrow
-lint — no debug assertions in paths that only ever run under `--release` — would
-have caught the most recent one when it was written; `src/` currently contains
-none, so such a gate would be green today and would fire the moment one returns.
+**It is not automated.** Four checks in this repository have turned out not to
+be exercisable. Three were controls that could not fire — a metric that could
+not be exercised in the configuration that disabled it, a pass reachable through
+an unobserved shortcut, and a debug assertion compiled out of the release build
+that ran it. The fourth was the verification of the third: it fired correctly,
+on purpose, and kept no record a reader could repeat, so this file briefly
+claimed a check that had to be taken on trust. That is the same failure,
+committed while fixing an instance of it — which is why the procedure above is
+written out rather than summarised.
+
+All four were found by someone else asking a differently-shaped question about
+something already checked. **Not one came from re-running an existing check more
+carefully.** That is worth knowing before trusting the remaining controls: the
+method that found four is cross-review, and this repository has no mechanism
+that supplies it on demand.
+
+A narrow lint — no debug assertions in paths that only ever run under
+`--release` — would have caught the third when it was written; `src/` currently
+contains none, so such a gate would be green today and would fire the moment one
+returns. It covers one of the four. The other three have no mechanical form that
+anyone here has proposed.
 
 ---
 
