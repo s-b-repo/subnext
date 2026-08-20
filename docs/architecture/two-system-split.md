@@ -187,7 +187,7 @@ the context window.
   by snapshot isolation plus an interrupt; every plan records `graph.version` and the runtime
   re-plans rather than answering from state that no longer holds.
 - ~~Workspace rebuild cost is the real bound on "destroy and rebuild at any time"~~ — measured:
-  1.75 ms mean cold rebuild against 27k tokens of history. See
+  1.66 ms mean cold rebuild against 27k tokens of history. See
   [workspace rebuild](workspace-rebuild.md).
 - B must also be able to prove it returned what it stored. That is a third responsibility the
   original split did not name, and it lives in

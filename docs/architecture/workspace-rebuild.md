@@ -46,24 +46,25 @@ durable; the workspace was never the source of anything.
 
 | probe | cold (ms) | warm (ms) | nodes | L1/L2/L3 rebuilt |
 |---|---:|---:|---:|---|
-| corrected fact (mid-history) | 0.18 | 0.09 | 6 | 0/6/0 |
-| corrected fact (late) | 1.07 | 0.13 | 11 | 7/11/0 |
-| old fact, never repeated | 1.56 | 0.14 | 12 | 7/12/0 |
-| exact quote | 3.45 | 0.87 | 14 | 10/14/0 |
-| justification / multi-hop | 0.16 | 0.09 | 7 | 0/7/0 |
-| detail buried in a long span | 5.71 | 0.26 | 23 | 21/23/0 |
-| corrected fact (very late) | 0.10 | 0.08 | 4 | 0/4/0 |
+| corrected fact (mid-history) | 0.84 | 0.12 | 7 | 1/7/0 |
+| corrected fact (late) | 1.06 | 0.14 | 11 | 7/11/0 |
+| old fact, never repeated | 1.55 | 0.15 | 12 | 7/12/0 |
+| exact quote | 2.34 | 0.16 | 14 | 10/14/0 |
+| justification / multi-hop | 0.14 | 0.09 | 7 | 0/7/0 |
+| detail buried in a long span | 5.60 | 0.27 | 23 | 21/23/0 |
+| corrected fact (very late) | 0.11 | 0.09 | 4 | 0/4/0 |
 
-**Mean cold rebuild 1.75 ms; mean warm assembly 0.24 ms.**
+**Mean cold rebuild 1.66 ms; mean warm assembly 0.14 ms.**
 
 - **Cold** is the real cost of the guarantee: every cached representation
   dropped, then the working set reassembled from L0 alone.
 - **Warm** is the same query with caches populated — what a second turn costs.
 
-The 7× gap is what the level cache buys, and it tracks how much L1 has to be
+The 12× gap is what the level cache buys, and it tracks how much L1 has to be
 rebuilt. The probes that admit only cached facts rebuild nothing and cost the
-same either way; the one that pulls long spans (21 L1 rebuilds) pays 5.7 ms and
-dominates the mean.
+same either way; the one that pulls long spans (21 L1 rebuilds) pays 5.6 ms and
+dominates the mean. Latencies are single-run and machine-dependent — they move
+by 10–15% between runs of the same binary — so the ratio is the durable part.
 
 ---
 
@@ -84,10 +85,10 @@ rebuild = plan(k) + materialise(admitted)
              └── includes retrieval, which is O(nodes) today
 ```
 
-Retrieval is a linear scan (see the known gap in [RESULTS.md](../../RESULTS.md)).
-Cold rebuild therefore grows with history even though the *materialisation* half
-does not. Until an ANN index lands, read this table as **"rebuild is bounded by
-the working set, plus a retrieval term that is not yet sub-linear."**
+An LSH index now prunes most of the vectors a query scores, but end-to-end
+latency still grows and the cost has moved into planning (see the known gap in
+[RESULTS.md](../../RESULTS.md)). Read this table as **"rebuild is bounded by the
+working set, plus a planning term not yet shown to be sub-linear."**
 
 ---
 
@@ -97,7 +98,7 @@ A full rebuild is the worst case, not the normal one. Three cheaper paths exist:
 
 | situation | what is rebuilt | cost |
 |---|---|---|
-| same query, caches warm | nothing | 0.24 ms |
+| same query, caches warm | nothing | 0.14 ms |
 | new query, overlapping working set | only the newly admitted nodes | proportional to the delta |
 | background consolidation invalidated part of the set | only the invalidated nodes, drained from the lazy queue | bounded by `max_cascade` |
 

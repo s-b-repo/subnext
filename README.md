@@ -97,7 +97,7 @@ container, and the telemetry the evaluation design asks for. See
 the honest limitations.
 
 Measured on a 300-turn synthetic incident transcript (27k tokens of history,
-`B_attention` = 1200): **457 tokens per query — 60x less attention than the full
+`B_attention` = 1200): **462 tokens per query — 59x less attention than the full
 history — with `k` staying flat as history grows 33x.** Against baselines that
 also retrieve, DCR answers 7/7 probes where top-k RAG answers 5/7 at 2.5x the
 tokens, and uniform summarisation answers 1/7.

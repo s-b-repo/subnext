@@ -45,7 +45,10 @@ unclear where the quality cliff is.
 
 ## 9. Is `O(k + r)` real?
 It holds only if `k`, `r`, and retrieval cost all stay bounded. Adversarial tasks (every turn
-needs new distant evidence) degrade toward O(N).
+needs new distant evidence) degrade toward O(N). Sub-linear retrieval has since landed (LSH
+pruning removes ~96% of scored vectors) and end-to-end latency *still* grows, so the binding
+constraint was never only retrieval — the planner's own cost has not been shown sub-linear
+either. The attention term is established; the end-to-end term is not.
 
 ## 10. Is tamper-evidence enough?
 The [context integrity](architecture/context-integrity.md) layer detects corruption, editing and
@@ -78,6 +81,6 @@ than returning an answer grounded in state that no longer holds.
 See `Dcr::ask_with_consolidation`.
 
 ### ~~Workspace rebuild cost~~ (was #10)
-Measured rather than asserted: mean cold rebuild 1.75 ms against 27k tokens of history, versus
-0.24 ms warm. The invariant is real at this scale, with the caveat that the retrieval term inside
-it is still linear. See [workspace rebuild](architecture/workspace-rebuild.md) and `bench --rebuild`.
+Measured rather than asserted: mean cold rebuild 1.66 ms against 27k tokens of history, versus
+0.14 ms warm. The invariant is real at this scale, with the caveat that the planning term inside
+it has not been shown to be sub-linear. See [workspace rebuild](architecture/workspace-rebuild.md) and `bench --rebuild`.

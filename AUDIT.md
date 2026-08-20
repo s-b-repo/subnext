@@ -51,9 +51,12 @@ cannot fail, so these are correct where they are. The invariant still holds
 where it matters: the only non-test panicking form under `src/` is the
 pre-existing `.last().unwrap()` in the ablation benchmark.
 
-**E — numeric casts (72 → 100).** The new hits are `as u64` / `as usize` in
-length prefixes and hex conversion, and `as f64` in the report arithmetic.
-Domain conversions in code that computes sizes it produced itself.
+**E — numeric casts (72 → 118 lines / 151 matches).** The new hits are
+`as u64` / `as usize` in length prefixes and hex conversion, and `as f64` in the
+report arithmetic. Domain conversions in code that computes sizes it produced
+itself. The fixed tool now separates distinct hit *lines* from raw *matches*,
+which is why this number looks like a jump: one line casting twice was
+previously counted once.
 
 **F — `std::fs::read` / `write` (1 → 13).** The container is a directory of
 files, so it reads and writes rather more than a single-file store did. Still
@@ -61,12 +64,26 @@ synchronous, still a deliberately offline library. Object writes go through
 `write_atomic` (temp file plus rename), which is the property that matters here:
 a partial write must never be mistakable for a whole object.
 
-**J — `tokens: usize` matched as a secret.** The matrix's `[Tt]oken` pattern
-looks for credentials in source; every token *count* field in this crate trips
-it. There is no secret anywhere in `src/` — the only secret-shaped value is
-`InsecureDevSigner`'s test key, which is now redacted in its `Debug` output
-after review found the derive would have printed it. That was a genuine finding
-from this matrix and the one real bug it has produced.
+**P — `Debug` over a struct containing a token (6).** Section P was dead until
+the tool was fixed: three of its four regexes never matched anything. The live
+one looks for a struct that derives `Debug` and holds a field whose name
+contains `token` — a credential printed by `{:?}`.
+
+All six current hits are token *counts*, not secrets: `Allocation.tokens`,
+`ActiveContext.tokens`, `RelevancePlanner.token_estimator`, `Answer.tokens`,
+`RebuildReport.tokens`, `Speculator.tokens`, and the three in `telemetry.rs`
+(`Turn.tokens`, `Telemetry.history_tokens`, `Report.tokens_per_query_max`).
+This crate counts tokens in the language-model sense on nearly every struct, so
+the pattern will keep firing here and the count is expected to stay at six or
+rise.
+
+**The pattern is still worth its false positives.** Before the fix it was dead,
+and while it was dead `InsecureDevSigner` shipped with a derived `Debug` over
+its `secret: String` — so formatting the signer would have printed the signing
+key. That is the one real bug this matrix has produced, and it was found the
+first time the section ran. The type exists to be conspicuously unsafe for
+protection, not to leak; it now has a manual `Debug` rendering the secret as
+`<redacted>`.
 
 **B — `let _ = …` (11 → 14).** The new ones discard the result of removing a
 sidecar during quarantine and of cleaning a scratch directory in the tamper
@@ -125,8 +142,26 @@ pluggable reasoner and a user-supplied token estimator.
 
 ## Not applicable
 
-C (lint suppression), G (logging), H (HTTP), I, L (crypto), M (injection),
-O (performance), P (API hygiene) report zero hits.
+C (lint suppression), G (logging), H (HTTP), I, L (crypto), M (injection) and
+O (performance) report zero hits. P no longer does — see above; it was reporting
+zero because its regexes were broken, not because the code was clean.
+
+## Re-baselined at `c17abf5`
+
+The audit tool itself was rewritten after it was found to pass silently on an
+empty `src/`, drop filenames containing spaces, and carry three section-P
+regexes that could never match. Counts below therefore come from a different
+instrument than the ones above them, and two moved for tool reasons rather than
+code reasons: **N 11 → 10** (two overlapping `Result<_, String>` patterns were
+double-counting one line) and **E**, which now reports lines and matches
+separately.
+
+Current totals: 274 distinct hit lines, 311 raw matches, 106 in gating sections,
+across 30 files and 13,529 lines.
+
+A tool that silently passes on an empty directory is worth more scrutiny than
+the code it audits — it had been reporting success for a case where it had
+examined nothing.
 
 ## Gating
 

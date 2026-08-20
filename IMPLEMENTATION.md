@@ -20,7 +20,7 @@ cargo run --release -- demo            # worked example through all four ladder 
 cargo run --release -- bench           # DCR vs full context vs sliding window
 cargo run --release -- bench --scaling --budget 800   # does k stay flat while N grows?
 cargo run --release -- bench --mutate  # is a correction served once the original has dependents?
-cargo test                             # 146 tests
+cargo test                             # 151 tests
 ```
 
 ```rust
@@ -111,7 +111,7 @@ three systems, so this compares *context assemblies*, not models.
 
 ```text
 probe                                    full  window    DCR   DCR tokens
-corrected fact (mid-history)            ok    MISS    ok          163
+corrected fact (mid-history)            ok    MISS    ok          196
 corrected fact (late)                   ok     ok     ok          419
 old fact, never repeated               MISS   MISS    ok          399
 exact quote                            MISS   MISS    ok          963
@@ -119,18 +119,19 @@ justification / multi-hop               ok    MISS    ok          192
 detail buried in a long span            ok    MISS    ok          962
 corrected fact (very late)              ok     ok     ok          102
 correct                                    5       2      7   of 7
-mean tokens per query                 27362.0  7968.0  457.1
-attention vs full history                 1x    3.4x    60x
+mean tokens per query                 27362.0  7968.0  461.9
+attention vs full history                 1x    3.4x    59x
 ```
 
 `cargo run --release -- bench --scaling --budget 800` — the `O(k + r)` claim:
 
 ```text
   turns   history   nodes   mean k   max k  correct   ingest    query
-    100      8482     124    412.0     764      7/7    0.01s     0.6ms
-    300     27362     298    406.9     787      7/7    0.05s     1.8ms
-   1000     93442     911    393.9     793      7/7    0.20s     3.8ms
-   3000    283253    2661    408.6     795      7/7    1.07s    16.2ms
+  turns   history   nodes   mean k   max k  correct   ingest     query ann query    ann k
+    100      8482     124    416.7     764      7/7    0.02s     0.6ms     0.6ms    416.7
+    300     27362     298    411.6     787      7/7    0.06s     1.6ms     1.3ms    451.7
+   1000     93442     911    398.6     793      7/7    0.22s     3.5ms     2.9ms    355.6
+   3000    283253    2661    413.3     795      7/7    1.04s    14.0ms     6.4ms    346.9
 
 history grew 33x; active context grew 0.99x
 ```
@@ -265,7 +266,7 @@ fixed; section A now holds only value-providing `unwrap_or_default`.
 
 ## Known limitations
 
-* **Retrieval is O(nodes).** The vector index is a linear scan. The cost model
+* **End-to-end latency still grows**, though retrieval is no longer why. The cost model
   needs sub-linear retrieval to hold at scale (see the query-latency column
   above: flat `k`, growing latency). Swap in an ANN index behind
   `src/index.rs`'s `VectorIndex` — the interface is three methods.

@@ -45,8 +45,8 @@ tokens per resolved query, audit-path completeness, demotions and budget
 overflows.
 
 On a 300-turn synthetic incident transcript (27k tokens of history,
-`B_attention` = 1200), attention cost is 457 tokens per query — 60x less than
-the full history — and stays flat (412 → 409 tokens) while history grows 33x to
+`B_attention` = 1200), attention cost is 462 tokens per query — 59x less than
+the full history — and stays flat (417 → 413 tokens) while history grows 33x to
 283k tokens.
 
 Against baselines that also retrieve rather than truncate, DCR answers 7/7
@@ -62,7 +62,7 @@ serves a derived figure whose inputs were corrected, and it answers a question
 nothing in history addresses. Both failures are real and neither is fixed; they
 are the most useful output the benchmark has produced.
 
-Destroying and rebuilding the workspace costs 1.75 ms cold against 0.24 ms warm,
+Destroying and rebuilding the workspace costs 1.66 ms cold against 0.14 ms warm,
 which is what makes "reconstructible at any time" a usable property rather than
 a slogan. See [workspace rebuild](architecture/workspace-rebuild.md).
 

@@ -8,12 +8,12 @@ cargo run --release -- bench --baselines            # DCR vs RAG / summarize / r
 cargo run --release -- bench --scaling --budget 800 # the flat-k table
 cargo run --release -- bench --rebuild              # what does a workspace rebuild cost?
 cargo run --release -- bench --tamper               # can the container detect tampering?
-cargo test                                          # 146 tests, ~14s
+cargo test                                          # 151 tests, ~14s
 ```
 
 Every benchmark is deterministic and offline. No API key, no network.
 
-**Measured at `1ff91f6`.** Benchmark numbers are pinned to a commit on purpose:
+**Measured at `c17abf5`.** Benchmark numbers are pinned to a commit on purpose:
 they move whenever retrieval, extraction or the planner moves, and a table
 without a revision attached is a table nobody can reproduce. Re-run the commands
 above after any change to `src/` and update this file with what they print —
@@ -29,14 +29,14 @@ including when the numbers get worse.
 | | full context | sliding window (8k) | DCR |
 |---|---:|---:|---:|
 | correct | 5/7 | 2/7 | **7/7** |
-| tokens/query | 27,362 | 7,968 | **457** |
-| attention vs full history | 1x | 3.4x | **60x** |
+| tokens/query | 27,362 | 7,968 | **462** |
+| attention vs full history | 1x | 3.4x | **59x** |
 
 Per probe:
 
 | probe | full | window | DCR | DCR tokens |
 |---|:---:|:---:|:---:|---:|
-| corrected fact (mid-history) | ok | MISS | ok | 163 |
+| corrected fact (mid-history) | ok | MISS | ok | 196 |
 | corrected fact (late) | ok | ok | ok | 419 |
 | old fact, never repeated | MISS | MISS | ok | 399 |
 | exact quote | MISS | MISS | ok | 963 |
@@ -49,12 +49,12 @@ Telemetry for the DCR column:
 ```
 escalation_rate         : 0.143
 stale_fact_read_rate    : 0.000
-tokens_per_query_mean   : 457.1
+tokens_per_query_mean   : 461.9
 tokens_per_query_max    : 963
 budget_overflows        : 0
 demotions               : 3
 audit_path_completeness : 1.000
-compression_ratio       : 59.7
+compression_ratio       : 59.1
 prefetch_hit_rate       : n/a
 wasted_builds           : 0
 ```
@@ -75,7 +75,7 @@ read this as "DCR is more accurate than a long-context model."
 
 The two load-bearing results are:
 
-1. **The token counts.** 457 vs 27,362 is a property of what gets assembled,
+1. **The token counts.** 462 vs 27,362 is a property of what gets assembled,
    and no amount of model quality changes it.
 2. **The window's misses.** They are structural. A fact that fell outside an
    8k window is unrecoverable at any model quality — that is the point of the
@@ -98,7 +98,7 @@ position — so beating them proves less than it looks. These three retrieve:
 | detail buried in a long span | ok | ok | MISS | ok | ok |
 | corrected fact (very late) | ok | ok | ok | ok | ok |
 | **correct** | 5/7 | 5/7 | 1/7 | 4/7 | **7/7** |
-| **mean tokens/query** | 27,362 | 1,168 | 1,197 | 31,074 | **457** |
+| **mean tokens/query** | 27,362 | 1,168 | 1,197 | 31,074 | **462** |
 
 - **RAG ties full context at 5/7**, using the same hybrid index DCR uses, at
   2.5x DCR's token cost. This is the honest headline: plain top-k retrieval is a
@@ -157,16 +157,18 @@ applied to every column equally.
 
 Same probes, same `B_attention = 800`, history scaled 33x:
 
-| turns | history | nodes | mean k | max k | correct | ingest | query |
-|---:|---:|---:|---:|---:|:---:|---:|---:|
-| 100 | 8,482 | 124 | 412.0 | 764 | 7/7 | 0.01s | 0.6ms |
-| 300 | 27,362 | 298 | 406.9 | 787 | 7/7 | 0.05s | 1.8ms |
-| 1,000 | 93,442 | 911 | 393.9 | 793 | 7/7 | 0.20s | 3.8ms |
-| 3,000 | 283,253 | 2,661 | 408.6 | 795 | 7/7 | 1.07s | 16.2ms |
+| turns | history | nodes | mean k | max k | correct | ingest | query | ann query | ann k |
+|---:|---:|---:|---:|---:|:---:|---:|---:|---:|---:|
+| 100 | 8,482 | 124 | 416.7 | 764 | 7/7 | 0.02s | 0.6ms | 0.6ms | 416.7 |
+| 300 | 27,362 | 298 | 411.6 | 787 | 7/7 | 0.06s | 1.6ms | 1.3ms | 451.7 |
+| 1,000 | 93,442 | 911 | 398.6 | 793 | 7/7 | 0.22s | 3.5ms | 2.9ms | 355.6 |
+| 3,000 | 283,253 | 2,661 | 413.3 | 795 | 7/7 | 1.04s | 14.0ms | 6.4ms | 346.9 |
 
 History grew **33x**; active context grew **0.99x**, and accuracy held at 7/7 at
 every size. That is the `O(k + r)` shape from the cost model, measured rather
-than asserted.
+than asserted — for the attention term. The `ann` columns are a second runtime
+over the same corpus with LSH pruning enabled; see the known gap below for what
+they do and do not show.
 
 Storage still grows `O(N)` — 124 → 2,661 nodes. The claim is bounded
 *attention*, not bounded storage.
@@ -178,10 +180,10 @@ Storage still grows `O(N)` — 124 → 2,661 nodes. The claim is bounded
 "Destroy and rebuild the workspace at any time" is only a guarantee if rebuild
 is cheap, so it is measured:
 
-**Mean cold rebuild 1.75 ms; mean warm assembly 0.24 ms** (300 turns, 298 nodes).
+**Mean cold rebuild 1.66 ms; mean warm assembly 0.14 ms** (300 turns, 298 nodes).
 
 Cold drops every cached representation and reassembles from L0 alone; warm is
-the same query with caches populated. The 7x gap tracks how much L1 must be
+the same query with caches populated. The 12x gap tracks how much L1 must be
 rebuilt — probes admitting only cached facts rebuild nothing and cost the same
 either way. Full table and caveats:
 [workspace rebuild](docs/architecture/workspace-rebuild.md).
@@ -210,18 +212,26 @@ evident, not impossible. See
 
 ---
 
-## Known gap: retrieval is not sub-linear
+## Known gap: end-to-end latency still grows, for a different reason
 
-**Query latency is not flat: 0.6ms → 16.2ms across the scaling run.** Vector
-search in `src/index.rs` is a linear scan over state nodes, so retrieval cost
-grows with the graph even though the assembled context does not.
+**Query latency is not flat: 0.6ms → 14.0ms across the scaling run**, and the
+previous explanation for that was wrong. This file used to attribute it to the
+vector index being a linear scan. An LSH index now prunes roughly 96% of the
+vectors a query scores and takes the index call to a fraction of a millisecond
+— and end-to-end latency still grows, only more slowly (14.0ms → 6.4ms at 3,000
+turns). The cost has moved into planning, which has not been shown to be
+sub-linear either.
 
-The cost model in [`docs/concepts/cost-model.md`](docs/concepts/cost-model.md)
-requires sub-linear retrieval for the `O(k + r)` claim to hold at real scale, so
-this is the next real piece of work. It is a two-method swap behind
-`src/index.rs`'s `VectorIndex` (an ANN index), not a redesign — but until it
-lands, the flat-k table above should be read as "flat attention, linear
-retrieval."
+So the `O(k + r)` claim stands for **attention** and remains unestablished
+**end to end**. The retraction is worth stating plainly because the earlier
+diagnosis was confidently wrong in exactly the way a benchmark is supposed to
+catch.
+
+The `ann k` column is the part not to skip. Approximate retrieval does not
+merely find the same nodes faster — it assembles a partly *different* working
+set, 10% larger at 300 turns and 16% smaller at 3,000. Correctness is identical
+at every size, and `run_scaling` asserts that rather than assuming it, but four
+rows do not establish equivalence.
 
 ---
 
