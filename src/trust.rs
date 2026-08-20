@@ -206,9 +206,19 @@ impl std::error::Error for TrustError {}
 /// reads as unprotected in an audit rather than as signed.
 ///
 /// [`is_cryptographic`]: Signer::is_cryptographic
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct InsecureDevSigner {
     secret: String,
+}
+
+// Deriving `Debug` would print `secret` verbatim; a signing key must never
+// reach a log line, a panic message, or `{:?}` output. Redact it by hand.
+impl std::fmt::Debug for InsecureDevSigner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InsecureDevSigner")
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 impl InsecureDevSigner {

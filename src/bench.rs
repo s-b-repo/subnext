@@ -17,7 +17,8 @@ use std::time::Instant;
 
 use crate::baselines::{Rag, Recursive, SummarizeAll};
 use crate::context_store::ContextStore;
-use crate::graph::DcrError;
+use crate::graph::{DcrError, MemoryGraph};
+use crate::nodes::{Kind, NodeIdx};
 use crate::llm::{LocalReasoner, Reasoner};
 use crate::runtime::Dcr;
 use crate::text::content_tokens;
@@ -1962,6 +1963,109 @@ pub fn run_decay(turns: usize, budget: usize) -> Result<(), DcrError> {
          cutoff starves the seed list, and a starved list falls back to the raw lexical index.\n\
          Default is 0.0 (off): on this corpus the filter is a correctness knob wearing a\n\
          latency costume."
+    );
+    Ok(())
+}
+
+/// Correctness and cost when the store is written to *while* a turn is in
+/// flight.
+///
+/// Every other table here comes from a single-threaded read path against a
+/// static store. The design calls its answer to concurrent mutation snapshot
+/// isolation with an interrupt: a plan records the store version it was built
+/// from, and if background consolidation invalidated anything in the working
+/// set during the model call, the runtime rebuilds rather than answering from a
+/// workspace that no longer holds. That path has tests but no numbers, and
+/// `replanned` is recorded on every answer and never reported.
+///
+/// This does not make the runtime concurrent — it is still one thread — but it
+/// does exercise the interrupt on the real probe set and price it.
+pub fn run_consolidation(turns: usize, budget: usize) -> Result<(), DcrError> {
+    let corpus = build_corpus(turns);
+    println!(
+        "CONCURRENT CONSOLIDATION - {turns} turns, {} tokens of history, B_attention = {budget}",
+        estimate_tokens(&corpus.text())
+    );
+    println!(
+        "a consolidation pass invalidates part of the working set mid-turn, after the plan is\n\
+         built and before the answer is returned"
+    );
+    let header = format!(
+        "{:<26} {:>9} {:>9} {:>10} {:>9}   {}",
+        "pressure", "correct", "mean k", "replanned", "esc.", "probes that fail"
+    );
+    println!("{}", "-".repeat(header.len()));
+    println!("{header}");
+    println!("{}", "-".repeat(header.len()));
+
+    for (label, invalidate_every) in [("none (baseline)", 0usize), ("every turn", 1)] {
+        let mut runtime = Dcr::new(budget);
+        for (doc_id, text) in &corpus.docs {
+            runtime.ingest(text, Some(doc_id))?;
+        }
+        let mut reasoner = LocalReasoner::new();
+        let (mut correct, mut replans, mut failed) = (0usize, 0usize, Vec::new());
+        for (turn, probe) in corpus.probes.iter().enumerate() {
+            let hit = invalidate_every > 0 && turn % invalidate_every == 0;
+            let mut fired = false;
+            let answer = runtime.ask_with_consolidation(
+                probe.query,
+                None,
+                &mut reasoner,
+                &mut |graph: &mut MemoryGraph| {
+                    if !hit || fired {
+                        return;
+                    }
+                    fired = true;
+                    // Invalidate the most recently touched live claim: the
+                    // adversarial case is consolidating exactly what the turn
+                    // in flight is standing on.
+                    let victim = graph
+                        .nodes()
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, n)| n.kind == Kind::Claim && n.status.is_live())
+                        .max_by_key(|(_, n)| n.timestamp)
+                        .map(|(i, _)| NodeIdx::from(i));
+                    if let Some(v) = victim {
+                        graph.invalidate(v, true);
+                    }
+                },
+            );
+            if answer.replanned {
+                replans += 1;
+            }
+            let scored = if probe.on_context {
+                answer.context.render()
+            } else {
+                answer.text.clone()
+            };
+            if probe.scores(&scored) {
+                correct += 1;
+            } else {
+                failed.push(probe.label);
+            }
+        }
+        let report = runtime.telemetry.report();
+        println!(
+            "{label:<26} {:>7}/{} {:>9.1} {:>9} {:>9.2}   {}",
+            correct,
+            corpus.probes.len(),
+            report.tokens_per_query_mean,
+            format!("{replans}/{}", corpus.probes.len()),
+            report.escalation_rate.unwrap_or(0.0),
+            if failed.is_empty() {
+                "-".to_string()
+            } else {
+                failed.join("; ")
+            }
+        );
+    }
+    println!("{}", "-".repeat(header.len()));
+    println!(
+        "Still single-threaded: this prices the interrupt, it does not show the runtime is\n\
+         safe under real concurrency. Nothing here runs two turns at once, and no lock is\n\
+         exercised, so contention and torn reads remain unmeasured."
     );
     Ok(())
 }
