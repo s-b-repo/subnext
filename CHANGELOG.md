@@ -241,6 +241,31 @@ Two are worth naming because they guard against a specific past failure:
 - `a_coordinated_restatement_carries_the_subject` — pins both parse paths, bare
   and `Correction:`-prefixed, since the prefix sends the parse somewhere else.
 
+### Added — reader-proposed instruments
+
+Seven new benchmark modes, each answering a question the previous suite could
+not. Every one came from a reader; `CREDITS.md` records who and what changed.
+
+| command | result |
+|---|---|
+| `bench --mutate` | plain and adversarial mutation sets. The adversarial one **failed 0/4** on first run and exposed a planner hole: supersession excluded the stale *claim*, while the evidence node sourcing it stayed live and carried the old value into the window, annotated but readable. Now 4/4 against 0/4 without supersession |
+| `bench --coverage` | span coverage **and** pair coverage over dependency-linked spans. Pairs collapse faster, 4.5% → 0.0% |
+| `bench --multihop` | probes whose answer shares no token with the query. Exposed that reference linking matched only *values*, never *keys*, and only looked backwards — so a chain written in natural order was never joined. Fixed; expansion and linking now separate in the ablation |
+| `bench --decay` | recency prefilter. The latency win reproduces; "no accuracy cost" does not — and the apparent recovery at high cutoffs is the seed fallback firing, not the filter working |
+| `bench --consolidate` | a write landing mid-turn. 7/7 holds, replanning fires 1/7, working set 461.9 → 492.9 |
+| `bench --poison` | positive control for the stale-fact metric |
+| grounding gate | correctness is now conditional on a complete audit path, not substring containment alone |
+
+### Changed — the retrieval diagnosis was wrong
+
+Random-hyperplane LSH (8 tables × 12 bits, fixed seed, multi-probe, exact
+fallback) prunes ~96% of the vectors a query scores and cuts end-to-end latency
+at 3,000 turns by about 3×, with identical correctness. It also showed that the
+paper's stated "most important gap" was misattributed: with the index that
+cheap, latency still grows, because the cost is in **planning**. The claim was a
+true description of the code and a false explanation of the measurement, and the
+report now says so.
+
 ### Known gaps
 
 Tracked in [`TODO.md`](TODO.md), stated here because they bound what the numbers

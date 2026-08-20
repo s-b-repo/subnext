@@ -1,12 +1,31 @@
 # TODO
 
-Open work on DCR, roughly in order of how much it would change what the paper
-can claim.
+Every item below has now been attempted, and each section records what was
+built, what it measured, and what is still open underneath it. Three of them
+changed a result rather than confirming one, and two contradicted something the
+paper previously asserted.
 
 Most of what follows was proposed by readers rather than by the authors, and is
 credited to them by name. The two threads it came from:
 [m/memory](https://www.moltbook.com/post/f82bcd30-68dc-4f31-846b-66913b846001)
 and [m/agents](https://www.moltbook.com/post/7a30fa26-869e-44fd-abb4-8871a0f63bd1).
+
+## Outcomes at a glance
+
+| # | proposed by | what it produced |
+|---|---|---|
+| 1 | @vespermind | `bench --coverage`. Storage grows O(N); read coverage does not — 9.9% → 0.4% |
+| 2 | @umiXBT, @groutboy | `bench --mutate` adversarial set. **Found a planner hole**: superseded evidence reached the window carrying the old value |
+| 3 | @evil_robot_jas | pair coverage. Collapses faster than span coverage, 4.5% → 0.0% |
+| 4 | @monty_cmr10_research, @miacollective | grounding-gated correctness. No-op on honest runs, as predicted |
+| 5 | @latte6 | `bench --decay`. Latency win is real; "no accuracy cost" **does not reproduce** |
+| 6 | — | LSH index. 3× faster, and showed retrieval **was never the bottleneck** |
+| 7 | — | `bench --multihop`. Expansion *is* load-bearing — reference linking was unreachable |
+| 8 | @latte6 | `bench --consolidate`. Prices the interrupt; still one thread |
+| 9 | — | 4 of 10 correction phrasings extracted nothing. Now 9 of 10 |
+
+Three of these contradicted something the paper asserted, and those are the ones
+worth reading: items 2, 5 and 6.
 
 ---
 
@@ -75,7 +94,7 @@ fired guard rather than an unexercised path.
 
 ---
 
-## 2. Adversarial mutation: make the stale node the tempting one
+## 2. Adversarial mutation — DONE (and it found a planner hole)
 
 **Proposed by [@umiXBT](https://www.moltbook.com/post/f82bcd30-68dc-4f31-846b-66913b846001), and independently named by [@groutboy](https://www.moltbook.com/post/7a30fa26-869e-44fd-abb4-8871a0f63bd1).**
 
@@ -108,7 +127,7 @@ checked for whether the probe ever asked the archive to lose.
 
 ---
 
-## 3. Co-occurrence coverage — the combinations nobody queried
+## 3. Co-occurrence coverage — DONE
 
 **Proposed by [@evil_robot_jas](https://www.moltbook.com/post/7a30fa26-869e-44fd-abb4-8871a0f63bd1), extending @vespermind's argument.**
 
@@ -143,7 +162,7 @@ What to build:
 
 ---
 
-## 4. Score grounding, not completion
+## 4. Score grounding, not completion — DONE
 
 **Prompted by [@miacollective](https://www.moltbook.com/post/7a30fa26-869e-44fd-abb4-8871a0f63bd1) and [@monty_cmr10_research](https://www.moltbook.com/post/7a30fa26-869e-44fd-abb4-8871a0f63bd1).**
 
@@ -175,7 +194,7 @@ output*, not just in the logs) is worth keeping in view.
 
 ---
 
-## 5. Time-decay pruning in front of the linear scan
+## 5. Time-decay pruning — DONE (and it does not reproduce as free)
 
 **Proposed by [@latte6](https://www.moltbook.com/post/f82bcd30-68dc-4f31-846b-66913b846001),
 from their own measurements on a 1.5k-node graph over a vector store.**
@@ -209,7 +228,7 @@ embarrassing.
 
 ---
 
-## 6. Sub-linear retrieval (standing known gap)
+## 6. Sub-linear retrieval — DONE (and it was not the binding constraint)
 
 Query latency is 0.6ms → 16.2ms across a 33× history growth because the vector
 search is a linear scan over state nodes. Attention is flat; retrieval is not.
@@ -221,7 +240,7 @@ Item 5 above is a mitigation, not a substitute.
 
 ---
 
-## 7. Is graph expansion earning its place?
+## 7. Is graph expansion earning its place? — ANSWERED: yes, once linking works
 
 From the ablation: turning graph expansion off makes the runtime **43% cheaper**
 (413.6 → 235.3 mean k) and loses nothing on this corpus. Same for reference
@@ -241,7 +260,7 @@ flags this as unresolved; it should be resolved.
 
 ---
 
-## 8. Concurrency and pressure
+## 8. Concurrency and pressure — PARTLY DONE
 
 Prompted by [@latte6](https://www.moltbook.com/post/f82bcd30-68dc-4f31-846b-66913b846001)'s
 original question about interference between memory types under pressure.
@@ -254,7 +273,7 @@ benchmarked. `replanned` is recorded per answer and never reported.
 
 ---
 
-## 9. Extractor: the general case behind the `migrated` bug
+## 9. Extractor: the general case — MOSTLY DONE (9 of 10 phrasings)
 
 The mutation probe caught `"was migrated and is now postgres-15"` extracting
 `migrated`. Fixed for the coordinated-restatement shape, deliberately narrowly:
@@ -356,3 +375,26 @@ The general lesson is worth applying elsewhere: **where an invariant is "all of
 X", test all of X rather than the member that once failed.** Candidates —
 every `Kind`/`Origin`/`Status` combination surviving a round trip, every ladder
 level costing less than the one below it, every `Rejection` variant reachable.
+
+---
+
+## What is still open
+
+- **Two multi-hop chains of three still fail.** They need partial-key matching
+  in reference linking, which risks over-linking, and guessing at the rule is
+  worse than leaving it.
+- **`we switched X to Y`** — the subject follows the verb. A different rule, not
+  another entry in the separator list.
+- **Planning is the new latency bottleneck.** With ~96% of vectors pruned, the
+  index call is a fraction of a millisecond and latency still grows. Nobody has
+  shown the planner is sub-linear, and the cost model needs that now instead.
+- **Real concurrency.** `bench --consolidate` prices the interrupt on one
+  thread. Nothing runs two turns at once, no lock is exercised, and contention
+  and torn reads are unmeasured.
+- **Pair coverage has the same conditioned numerator** as span coverage: a
+  larger or adversarial probe set would raise it, and nothing tests whether it
+  can rise faster than N.
+- **The Python implementation has drifted.** It has the extractor fixes and the
+  mutation probe; it does not have the planner's superseded-evidence guard, the
+  adversarial set, pair coverage, LSH, the multi-hop probe, the decay prefilter
+  or the consolidation harness.
