@@ -9,7 +9,7 @@
 //! Span vectors are deliberately not built eagerly: spans get the cheap lexical
 //! index at ingest, and only nodes (few, small) get vectors.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::embed::{DIM, cosine, hashing_embed};
 use crate::text::content_tokens;
@@ -110,32 +110,183 @@ impl LexicalIndex {
     }
 }
 
-#[derive(Debug, Default)]
+/// Random-hyperplane LSH over the hashing embedding.
+///
+/// The exact path scores every vector, so retrieval cost grows with the store
+/// even though assembled context does not — "flat attention, linear retrieval",
+/// the gap the cost model says has to close before `O(k + r)` means anything at
+/// scale.
+///
+/// For cosine similarity the standard trick is a sign-random-projection
+/// signature: the probability two vectors land on the same side of a random
+/// hyperplane is `1 - theta/pi`, so agreeing signature bits estimate the angle.
+/// Vectors are bucketed by signature and a query scores only its own bucket,
+/// which is sub-linear when the store is larger than the bucket.
+///
+/// Planes are generated from a fixed seed by splitmix64, because everything in
+/// this runtime has to be reproducible — an ablation cannot be attributed if two
+/// runs of the same configuration differ.
+///
+/// Recall is protected two ways: each vector is indexed in several independent
+/// tables, and a query whose buckets yield too few candidates falls back to the
+/// exact scan rather than returning a short list. That makes the structure a
+/// pruning step, never a source of silent misses.
+#[derive(Debug)]
+struct Lsh {
+    planes: Vec<Vec<f32>>,
+    tables: Vec<HashMap<u32, Vec<usize>>>,
+}
+
+const LSH_TABLES: usize = 8;
+const LSH_BITS: usize = 12;
+const LSH_SEED: u64 = 0x5DEE_CE66_D1CE_F00D;
+
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+impl Lsh {
+    fn new(dim: usize) -> Self {
+        let mut state = LSH_SEED;
+        let planes = (0..LSH_TABLES * LSH_BITS)
+            .map(|_| {
+                (0..dim)
+                    // uniform in [-1, 1); adequate for sign projection, and
+                    // cheaper than a Gaussian we would only take the sign of.
+                    .map(|_| (splitmix64(&mut state) as f64 / u64::MAX as f64) as f32 * 2.0 - 1.0)
+                    .collect()
+            })
+            .collect();
+        Self {
+            planes,
+            tables: (0..LSH_TABLES).map(|_| HashMap::new()).collect(),
+        }
+    }
+
+    fn signature(&self, table: usize, v: &[f32]) -> u32 {
+        let mut sig = 0u32;
+        for bit in 0..LSH_BITS {
+            let plane = &self.planes[table * LSH_BITS + bit];
+            let dot: f32 = v
+                .iter()
+                .zip(plane.iter())
+                .map(|(a, b)| a * b)
+                .sum();
+            if dot >= 0.0 {
+                sig |= 1 << bit;
+            }
+        }
+        sig
+    }
+
+    fn insert(&mut self, id: usize, v: &[f32]) {
+        for t in 0..LSH_TABLES {
+            let sig = self.signature(t, v);
+            self.tables[t].entry(sig).or_default().push(id);
+        }
+    }
+
+    fn remove(&mut self, id: usize, v: &[f32]) {
+        for t in 0..LSH_TABLES {
+            let sig = self.signature(t, v);
+            if let Some(bucket) = self.tables[t].get_mut(&sig) {
+                bucket.retain(|&other| other != id);
+            }
+        }
+    }
+
+    /// Candidate ids: the query's own bucket in every table, plus each bucket
+    /// one bit away (multi-probe), which recovers most near-boundary misses
+    /// without another table.
+    fn candidates(&self, v: &[f32]) -> HashSet<usize> {
+        let mut out = HashSet::new();
+        for t in 0..LSH_TABLES {
+            let sig = self.signature(t, v);
+            if let Some(ids) = self.tables[t].get(&sig) {
+                out.extend(ids.iter().copied());
+            }
+            for bit in 0..LSH_BITS {
+                if let Some(ids) = self.tables[t].get(&(sig ^ (1 << bit))) {
+                    out.extend(ids.iter().copied());
+                }
+            }
+        }
+        out
+    }
+}
+
+#[derive(Debug)]
 pub struct VectorIndex {
     vectors: HashMap<usize, Vec<f32>>,
+    lsh: Lsh,
+    /// Score every vector instead of pruning. Kept switchable so the two paths
+    /// can be compared on the same corpus rather than argued about.
+    pub exact: bool,
+    /// Below this many vectors a full scan is already cheap and bucketing only
+    /// costs recall, so the structure is bypassed.
+    min_for_ann: usize,
+}
+
+impl Default for VectorIndex {
+    fn default() -> Self {
+        Self {
+            vectors: HashMap::new(),
+            lsh: Lsh::new(DIM),
+            exact: true,
+            min_for_ann: 256,
+        }
+    }
 }
 
 impl VectorIndex {
     pub fn add(&mut self, id: usize, vector: Vec<f32>) {
+        self.lsh.insert(id, &vector);
         self.vectors.insert(id, vector);
     }
 
     pub fn add_text(&mut self, id: usize, text: &str) {
-        self.vectors.insert(id, hashing_embed(text, DIM));
+        self.add(id, hashing_embed(text, DIM));
     }
 
     pub fn remove(&mut self, id: usize) {
-        self.vectors.remove(&id);
+        if let Some(v) = self.vectors.remove(&id) {
+            self.lsh.remove(id, &v);
+        }
     }
 
     pub fn search(&self, query_vec: &[f32], k: usize) -> Vec<(usize, f32)> {
-        let scored: Vec<(usize, f32)> = self
-            .vectors
-            .iter()
-            .map(|(&id, v)| (id, cosine(query_vec, v)))
-            .filter(|(_, s)| *s > 0.0)
-            .collect();
-        rank(scored, k)
+        let score = |ids: Box<dyn Iterator<Item = usize> + '_>| -> Vec<(usize, f32)> {
+            ids.filter_map(|id| {
+                let v = self.vectors.get(&id)?;
+                let s = cosine(query_vec, v);
+                (s > 0.0).then_some((id, s))
+            })
+            .collect()
+        };
+        if self.exact || self.vectors.len() < self.min_for_ann {
+            return rank(score(Box::new(self.vectors.keys().copied())), k);
+        }
+        let candidates = self.lsh.candidates(query_vec);
+        // A bucket that cannot supply k results is not evidence that no match
+        // exists, so fall back rather than return a short list. Pruning must
+        // never be a source of silent misses.
+        if candidates.len() < k.max(8) {
+            return rank(score(Box::new(self.vectors.keys().copied())), k);
+        }
+        rank(score(Box::new(candidates.into_iter())), k)
+    }
+
+    /// How many vectors a query would actually score, for the scaling table.
+    pub fn probe_width(&self, query_vec: &[f32], k: usize) -> usize {
+        if self.exact || self.vectors.len() < self.min_for_ann {
+            return self.vectors.len();
+        }
+        let c = self.lsh.candidates(query_vec).len();
+        if c < k.max(8) { self.vectors.len() } else { c }
     }
 
     pub fn len(&self) -> usize {
@@ -222,6 +373,25 @@ impl HybridIndex {
             }
         }
         rank(combined.into_iter().collect(), k)
+    }
+
+    /// Score every vector instead of pruning, on both node and span stores.
+    /// Present so the exact and approximate paths can be measured against each
+    /// other on the same corpus.
+    pub fn set_exact(&mut self, exact: bool) {
+        self.node_vector.exact = exact;
+        self.span_vector.exact = exact;
+    }
+
+    /// How many node vectors a query would score, for the scaling table.
+    pub fn node_probe_width(&self, query: &str, k: usize) -> (usize, usize) {
+        let v = crate::embed::hashing_embed(query, crate::embed::DIM);
+        (self.node_vector.probe_width(&v, k), self.node_vector.len())
+    }
+
+    pub fn span_probe_width(&self, query: &str, k: usize) -> (usize, usize) {
+        let v = crate::embed::hashing_embed(query, crate::embed::DIM);
+        (self.span_vector.probe_width(&v, k), self.span_vector.len())
     }
 
     pub fn stats(&self) -> IndexStats {
