@@ -253,7 +253,16 @@ impl HeuristicExtractor {
                 continue;
             }
             let key = normalise_key(&key_raw);
-            let value = clean_value(raw_value).to_string();
+            let mut value = clean_value(raw_value).to_string();
+            let mut consumed = value_end;
+            if depth == 0 {
+                if let Some((restated, end)) =
+                    restatement_after(text, value_end, self.max_value_chars)
+                {
+                    value = restated;
+                    consumed = end;
+                }
+            }
             if key.is_empty() || value.is_empty() {
                 continue;
             }
@@ -264,7 +273,7 @@ impl HeuristicExtractor {
                 continue;
             }
             out.push((key, value));
-            cursor = value_end.max(cursor);
+            cursor = consumed.max(cursor);
         }
         out
     }
@@ -447,6 +456,73 @@ fn clause_end(text: &str, from: usize, max_chars: usize) -> Option<usize> {
     Some(text.len())
 }
 
+/// Temporal adverbs that front a value without being part of it:
+/// `is now postgres-15` carries the value `postgres-15`.
+const LEADING_ADVERBS: &[&str] = &["now", "currently", "presently", "already"];
+
+fn strip_leading_adverb(value: &str) -> &str {
+    let trimmed = value.trim_start();
+    for adv in LEADING_ADVERBS {
+        if trimmed.len() > adv.len()
+            && trimmed.is_char_boundary(adv.len())
+            && trimmed[..adv.len()].eq_ignore_ascii_case(adv)
+            && trimmed.as_bytes()[adv.len()].is_ascii_whitespace()
+        {
+            let rest = trimmed[adv.len()..].trim_start();
+            if !rest.is_empty() {
+                return rest;
+            }
+        }
+    }
+    trimmed
+}
+
+fn matches_word(text: &str, at: usize, word: &str) -> bool {
+    let end = at + word.len();
+    if end > text.len() || !text.is_char_boundary(at) || !text.is_char_boundary(end) {
+        return false;
+    }
+    if !text[at..end].eq_ignore_ascii_case(word) {
+        return false;
+    }
+    text.as_bytes()
+        .get(end)
+        .is_none_or(|b| !is_word_char(*b as char))
+}
+
+/// A coordinated clause that restates the subject's *current* value:
+/// `the datastore was migrated and is now postgres-15`.
+///
+/// The subject carries across the conjunction, so the later value is the live
+/// one and the earlier participle ("migrated") is not a value at all. This is
+/// deliberately tight — the copula must be present tense *and* followed by
+/// `now` — because "X is A and is B" is a real ambiguity and over-extraction is
+/// not a neutral failure here.
+fn restatement_after(text: &str, from: usize, max_chars: usize) -> Option<(String, usize)> {
+    let mut i = skip_ws(text, from);
+    if text.as_bytes().get(i).is_some_and(|b| *b == b',' || *b == b';') {
+        i = skip_ws(text, i + 1);
+    }
+    for conj in ["and", "but", "then", "so"] {
+        if matches_word(text, i, conj) {
+            i = skip_ws(text, i + conj.len());
+            break;
+        }
+    }
+    if matches_word(text, i, "it") {
+        i = skip_ws(text, i + 2);
+    }
+    let copula = ["is", "are"].into_iter().find(|c| matches_word(text, i, c))?;
+    i = skip_ws(text, i + copula.len());
+    if !matches_word(text, i, "now") {
+        return None;
+    }
+    i = skip_ws(text, i + 3);
+    let end = clause_end(text, i, max_chars)?;
+    let value = clean_value(text[i..end].trim_end()).to_string();
+    (!value.is_empty()).then_some((value, end))
+}
+
 fn normalise_key(key: &str) -> String {
     let mut key = key.trim().to_lowercase();
     key = key.split_whitespace().collect::<Vec<_>>().join(".");
@@ -483,7 +559,7 @@ fn clean_value(value: &str) -> &str {
             }
         }
     }
-    strip_quotes(value)
+    strip_leading_adverb(strip_quotes(value))
 }
 
 /// Everything the indexer needs to write into, borrowed for one ingest.

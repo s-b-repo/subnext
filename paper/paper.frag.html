@@ -1,7 +1,7 @@
 <section class="abstract">
 <h2>Abstract</h2>
 <p>Language models degrade as irrelevant, stale, and superseded material accumulates in their context — a failure commonly called <em>context rot</em>. Enlarging the context window does not remove it: attention cost grows quadratically, mid-context material is used unreliably, and a corrected fact does not stop competing with the value it replaced. We describe the <strong>Dynamic Context Runtime</strong> (DCR), a system that separates <em>unbounded history</em> from <em>bounded attention</em>. History is stored as immutable, addressable spans and compiled into a typed dependency graph of facts, decisions, and derivations, each bound to the spans that ground it. Each turn, a planner assembles a small working set by solving a multiple-choice knapsack over (node, representation-level) pairs under an explicit token budget, so the model never sees the transcript — only the cheapest sufficient representation of what the current question needs.</p>
-<p>We give a zero-dependency Rust reference implementation (7,492 lines) that enforces the design's invariants in code rather than in prose: unsourced facts are rejected at insertion, nothing is deleted, and no stale node reaches the model. We evaluate it with a deliberately non-neural instrument — a deterministic line-matching reasoner shared by all conditions — which isolates the quality of <em>context assembly</em> from the quality of the model. On a 300-turn synthetic incident transcript (27,362 tokens), DCR answers all seven probes using 467 tokens per query on average, 59× less attention than the full history, and answers all seven from a 200-token budget. Across a 33× growth in history (8.5k → 283k tokens) the working set stays flat at ~420 tokens with no loss of correctness. An ablation identifies which mechanisms carry which probes — and reports two that carry nothing on this corpus. We state plainly what the evaluation cannot show: it is a synthetic corpus, the instrument is not a language model, and we do not compare against a recursive-language-model implementation.</p>
+<p>We give a zero-dependency Rust reference implementation (7,492 lines) that enforces the design's invariants in code rather than in prose: unsourced facts are rejected at insertion, nothing is deleted, and no stale node reaches the model. We evaluate it with a deliberately non-neural instrument — a deterministic line-matching reasoner shared by all conditions — which isolates the quality of <em>context assembly</em> from the quality of the model. On a 300-turn synthetic incident transcript (27,362 tokens), DCR answers all seven probes using 467 tokens per query on average, 59× less attention than the full history, and answers all seven from a 200-token budget. Across a 33× growth in history (8.5k → 283k tokens) the working set stays flat at ~420 tokens with no loss of correctness. An ablation identifies which mechanisms carry which probes — and reports two that carry nothing on this corpus. A positive control turns the runtime's stale-fact metric from a zero that could not fire into a measured guard, and a read-coverage metric — the offline dual of audit completeness — shows the fraction of history the model ever actually sees collapsing toward zero as history grows: the blind region, not the working set, is what grows with <span class="m">N</span>. We state plainly what the evaluation cannot show: it is a synthetic corpus, the instrument is not a language model, and we do not compare against a recursive-language-model implementation.</p>
 </section>
 
 <h2 id="s1">1&ensp;Introduction</h2>
@@ -169,7 +169,7 @@ FIGURE_ARCH
 </table>
 
 <p>The sliding window's five misses are the important ones, because they are <em>structural</em>: the server-IP correction and the service owner both fall outside the most recent 8,000 tokens, and no model quality recovers a fact that is not in the input. The full-context column should be read as a floor rather than a ceiling — a real language model reading the whole transcript would beat a line matcher on these probes. What no model quality changes is the token column.</p>
-<p>DCR's per-turn telemetry for this run: escalation rate 0.14, stale-fact read rate 0.00, audit-path completeness 1.00, three budget-forced demotions, zero budget overflows. The stale-fact read rate needs a caveat, because a zero is only informative if the instrument could have returned something else. It counts context entries whose node the runtime has <em>marked</em> stale, so 0.00 establishes that the exclusion path holds given correct marking — not that marking is complete. In the one configuration where superseded values are demonstrably read it cannot fire at all: with supersession disabled no node is ever marked, and the rate stays 0.00 while two probes return corrected-away values (Table 6). Read it as a check on exclusion given marking, and read the supersession row of Table 6 as the evidence that marking is load-bearing. The two expensive probes (963 and 962 tokens) are the two that escalated to raw bytes; that cost appears in the table rather than being hidden.</p>
+<p>DCR's per-turn telemetry for this run: escalation rate 0.14, stale-fact read rate 0.00, audit-path completeness 1.00, three budget-forced demotions, zero budget overflows. The stale-fact read rate carries a caveat a zero always carries — it is only informative if the instrument could have returned something else — which §5.9 discharges with an explicit positive control rather than asking the reader to take the zero on trust. The two expensive probes (963 and 962 tokens) are the two that escalated to raw bytes; that cost appears in the table rather than being hidden.</p>
 
 <h3>5.5&ensp;Result 2 — does <span class="m">k</span> stay flat?</h3>
 <p>The design targets a per-turn cost of <span class="m">O(k + r)</span> — active state plus bounded fresh retrieval — while total history <span class="m">N</span> grows without bound. The falsifiable version of that claim is simply: hold the budget fixed, grow the history, and watch the working set.</p>
@@ -234,6 +234,34 @@ FIGURE_SCALE
 <h3>5.8&ensp;The price of the memory runtime</h3>
 <p>Ingestion of the 300-turn corpus produces 301 spans, 298 state nodes, and 705 edges, and builds 35 summaries and 823 vectors, in 0.04 s. That cost is paid once and amortised over every subsequent query; it is not part of the per-turn token budget. Storage remains <span class="m">O(N)</span> and unbounded by design — the claim is bounded attention, not bounded storage.</p>
 
+<h3>5.9&ensp;A positive control for the stale-fact metric</h3>
+<p>A reviewer objected, correctly, that the <span class="m">stale_fact_read_rate = 0.0</span> reported above is not yet a measurement.<span class="fn">2</span> A zero is only evidence if the run could have produced something else; otherwise it records that the exclusion path was never exercised, not that it works. A control that cannot fire and a control that passes are the same row in a table. We therefore add a control whose expected value is written down before it is run.</p>
+<p>The setup poisons a derivation. A value is computed from an input fact; the input is then corrected, so the derivation depends on a superseded fact and is marked stale; a probe asks for exactly that value. We run it twice — once in production configuration, once with the staleness guard bypassed — with these expectations fixed in advance:</p>
+<table class="small">
+<caption><strong>Table 7.</strong> Stale-fact positive control. Expected values fixed before execution.</caption>
+<thead><tr><th>Run</th><th class="r">expected rate</th><th class="r">measured</th><th class="c">verdict</th></tr></thead>
+<tbody>
+<tr><td>guard on (production)</td><td class="r">0.0</td><td class="r">0.0</td><td class="c ok">pass</td></tr>
+<tr><td>guard off (bypassed)</td><td class="r">1.0</td><td class="r">1.0</td><td class="c ok">pass</td></tr>
+</tbody>
+</table>
+<p>The bypassed run reaches 1.0, so the metric can return nonzero; the production run is driven to 0.0 by the guard. Only this pairing licenses reading the production zero in §5.4's telemetry as a guard that fired rather than one that was never called. Absent the control, that cell should not have been in the table.</p>
+
+<h3>5.10&ensp;Read coverage: the unconditioned dual</h3>
+<p>Every probe in §5.2 asks for something already known to be in the history. That is a conditioned sample, and the failure mode that motivates this work lies outside it: an answer comes back fluent precisely because nothing in the query revealed that a dropped detail governed it, so no one writes a probe for that detail. A benchmark can only sample the region a probe author already indexed; the silent failures live strictly outside it. No query-layer "did my context degrade" check escapes this, because any such check is conditioned on knowing what went missing.</p>
+<p>One number is not so conditioned. <span class="m">audit_path_completeness</span> is a property of answers; invert it and measure <em>read coverage</em> — the fraction of source spans that have ever appeared, at L0, in any assembled context. This replays no queries and is conditioned on nothing. We count L0 alone deliberately: it is the only ladder level that renders a span's actual bytes. Counting any admission overcounts badly, because corroboration collapses many agreeing spans behind one node — on this corpus a single L1 fact can sit on several hundred spans, none of whose specific content was shown. A span is covered only when its bytes reached the model.</p>
+<table class="figure-wide">
+<caption><strong>Table 8.</strong> Read coverage against corpus size, <span class="m">B</span> = 800, after replaying the fixed probe set.</caption>
+<thead><tr><th class="r">turns</th><th class="r">spans <span class="m">N</span></th><th class="r">ever shown (L0)</th><th class="r">coverage</th><th class="r">never seen</th></tr></thead>
+<tbody>
+<tr><td class="r">100</td><td class="r">101</td><td class="r">10</td><td class="r">9.9%</td><td class="r">91</td></tr>
+<tr><td class="r">300</td><td class="r">301</td><td class="r">8</td><td class="r">2.7%</td><td class="r">293</td></tr>
+<tr><td class="r">1,000</td><td class="r">1,001</td><td class="r">6</td><td class="r">0.6%</td><td class="r">995</td></tr>
+<tr><td class="r">3,000</td><td class="r">3,001</td><td class="r">6</td><td class="r">0.2%</td><td class="r">2,995</td></tr>
+</tbody>
+</table>
+<p>The count of spans ever shown is flat — six to ten — while history grows thirty-fold, so coverage collapses from 9.9% to 0.2% and the unread region grows linearly with <span class="m">N</span>. This is the dual cost of bounded attention, and it is exactly what the probe table in §5.4 cannot express: the runtime answers from compact facts without ever surfacing most of the history's content, so a span whose specifics silently governed an answer can never be caught by a probe. Storage grows <span class="m">O(N)</span>; read coverage does not — the blind region does. Whether that region can be audited without replaying it — for instance by flagging never-covered spans whose facts feed admitted decisions — is left open (§7).</p>
+
 <h2 id="s6">6&ensp;Threats to validity</h2>
 
 <p>We state these plainly because the results above are easy to over-read.</p>
@@ -264,6 +292,8 @@ FIGURE_SCALE
 
 <p><strong>Multi-hop evaluation.</strong> The probe set needs questions whose answers exist only as a composition of two nodes, so that graph expansion and reference linking can be validated or discarded on evidence.</p>
 
+<p><strong>Auditing the unread region.</strong> Read coverage (§5.10) names where confident wrong answers can hide but does not detect them: a never-covered span is only dangerous if its content would have changed an answer, and deciding that without surfacing the span is unsolved. A cheap proxy — flag never-covered spans whose extracted facts feed an admitted decision — is worth testing, but a span the extractor never turned into a fact is invisible even to that.</p>
+
 <p><strong>Bounded revalidation.</strong> Cascades are bounded and the tail is deferred, but we do not characterise the staleness that deferral admits, nor the cost of rebuilding a workspace from the store — the invariant that the working set is disposable is only useful if rebuilding is cheap.</p>
 
 <h2 id="s8">8&ensp;Conclusion</h2>
@@ -278,6 +308,8 @@ FIGURE_SCALE
 cargo run --release -- bench --scaling            # Table 4, Figure 2
 cargo run --release -- bench --sweep              # Table 5
 cargo run --release -- bench --ablate             # Table 6
+cargo run --release -- bench --poison             # Table 7 (stale-fact control)
+cargo run --release -- bench --coverage           # Table 8 (read coverage)
 cargo run --release -- bench --mutate             # Table 7
 cargo test                                        # 75 tests</pre>
 
@@ -301,4 +333,5 @@ cargo test                                        # 75 tests</pre>
 
 <div class="footnotes">
 <p><span class="fn">1</span> The recursive-language-model framing used here is taken from the Dynamic Context Runtime specification wiki (<span class="tt">github.com/s-b-repo/subnext</span>), which describes the primitive as treating context as a variable in a REPL that the model can slice and recursively query. This paper responds to that framing; it does not evaluate against any particular implementation of it.</p>
+<p><span class="fn">2</span> The positive control of §5.9 and the read-coverage metric of §5.10 were prompted by a public review from the commenter <span class="tt">vespermind</span>, who argued that the stale-fact zero was unmeasured and that read coverage is the one degradation signal not conditioned on knowing what went missing. Both points were correct; the implementation of read coverage also surfaced the corroboration over-count noted in §5.10, which the L0-only definition corrects.</p>
 </div>
