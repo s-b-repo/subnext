@@ -62,7 +62,7 @@ serves a derived figure whose inputs were corrected, and it answers a question
 nothing in history addresses. Both failures are real and neither is fixed; they
 are the most useful output the benchmark has produced.
 
-Destroying and rebuilding the workspace costs 1.66 ms cold against 0.14 ms warm,
+Destroying and rebuilding the workspace costs 1.55 ms cold against 0.15 ms warm,
 which is what makes "reconstructible at any time" a usable property rather than
 a slogan. See [workspace rebuild](architecture/workspace-rebuild.md).
 

@@ -13,7 +13,7 @@ cargo test                                          # 151 tests, ~14s
 
 Every benchmark is deterministic and offline. No API key, no network.
 
-**Measured at `c17abf5`.** Benchmark numbers are pinned to a commit on purpose:
+**Measured at `3821cc5`.** Benchmark numbers are pinned to a commit on purpose:
 they move whenever retrieval, extraction or the planner moves, and a table
 without a revision attached is a table nobody can reproduce. Re-run the commands
 above after any change to `src/` and update this file with what they print —
@@ -159,10 +159,10 @@ Same probes, same `B_attention = 800`, history scaled 33x:
 
 | turns | history | nodes | mean k | max k | correct | ingest | query | ann query | ann k |
 |---:|---:|---:|---:|---:|:---:|---:|---:|---:|---:|
-| 100 | 8,482 | 124 | 416.7 | 764 | 7/7 | 0.02s | 0.6ms | 0.6ms | 416.7 |
-| 300 | 27,362 | 298 | 411.6 | 787 | 7/7 | 0.06s | 1.6ms | 1.3ms | 451.7 |
-| 1,000 | 93,442 | 911 | 398.6 | 793 | 7/7 | 0.22s | 3.5ms | 2.9ms | 355.6 |
-| 3,000 | 283,253 | 2,661 | 413.3 | 795 | 7/7 | 1.04s | 14.0ms | 6.4ms | 346.9 |
+| 100 | 8,482 | 124 | 416.7 | 764 | 7/7 | 0.02s | 0.6ms | 0.5ms | 416.7 |
+| 300 | 27,362 | 298 | 411.6 | 787 | 7/7 | 0.05s | 1.4ms | 1.1ms | 451.7 |
+| 1,000 | 93,442 | 911 | 398.6 | 793 | 7/7 | 0.22s | 3.3ms | 2.6ms | 355.6 |
+| 3,000 | 283,253 | 2,661 | 413.3 | 795 | 7/7 | 1.02s | 12.6ms | 5.8ms | 346.9 |
 
 History grew **33x**; active context grew **0.99x**, and accuracy held at 7/7 at
 every size. That is the `O(k + r)` shape from the cost model, measured rather
@@ -180,7 +180,7 @@ Storage still grows `O(N)` — 124 → 2,661 nodes. The claim is bounded
 "Destroy and rebuild the workspace at any time" is only a guarantee if rebuild
 is cheap, so it is measured:
 
-**Mean cold rebuild 1.66 ms; mean warm assembly 0.14 ms** (300 turns, 298 nodes).
+**Mean cold rebuild 1.55 ms; mean warm assembly 0.15 ms** (300 turns, 298 nodes).
 
 Cold drops every cached representation and reassembles from L0 alone; warm is
 the same query with caches populated. The 12x gap tracks how much L1 must be
@@ -214,11 +214,11 @@ evident, not impossible. See
 
 ## Known gap: end-to-end latency still grows, for a different reason
 
-**Query latency is not flat: 0.6ms → 14.0ms across the scaling run**, and the
+**Query latency is not flat: 0.6ms → 12.6ms across the scaling run**, and the
 previous explanation for that was wrong. This file used to attribute it to the
 vector index being a linear scan. An LSH index now prunes roughly 96% of the
 vectors a query scores and takes the index call to a fraction of a millisecond
-— and end-to-end latency still grows, only more slowly (14.0ms → 6.4ms at 3,000
+— and end-to-end latency still grows, only more slowly (12.6ms → 5.8ms at 3,000
 turns). The cost has moved into planning, which has not been shown to be
 sub-linear either.
 
@@ -230,8 +230,11 @@ catch.
 The `ann k` column is the part not to skip. Approximate retrieval does not
 merely find the same nodes faster — it assembles a partly *different* working
 set, 10% larger at 300 turns and 16% smaller at 3,000. Correctness is identical
-at every size, and `run_scaling` asserts that rather than assuming it, but four
-rows do not establish equivalence.
+at every size, and `run_scaling` asserts that with a live `assert_eq!` — checked
+by deliberately diverging the approximate path and confirming the benchmark
+aborts, because the check was previously a `debug_assert!` that `--release`
+compiled out, making it a control that could not fire inside the table it
+guarded. Four rows still do not establish equivalence.
 
 ---
 

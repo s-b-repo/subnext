@@ -148,7 +148,7 @@ C (lint suppression), G (logging), H (HTTP), I, L (crypto), M (injection) and
 O (performance) report zero hits. P no longer does — see above; it was reporting
 zero because its regexes were broken, not because the code was clean.
 
-## Re-baselined at `c17abf5`
+## Re-baselined at `3821cc5`
 
 The audit tool itself was rewritten after it was found to pass silently on an
 empty `src/`, drop filenames containing spaces, and carry three section-P
@@ -159,7 +159,13 @@ double-counting one line) and **E**, which now reports lines and matches
 separately.
 
 Current totals: 274 distinct hit lines, 311 raw matches, 106 in gating sections,
-across 30 files and 13,529 lines.
+across 30 files and 13,539 lines. Unchanged from the `c17abf5` baseline except
+that one pattern stopped matching: the crate's only `debug_assert_eq!` became a
+real `assert_eq!`, because it guarded Table 4's correctness-equality claim and
+every benchmark runs `--release`, where debug assertions are compiled out. It
+was a control that could not fire, sitting inside the table that reported the
+result it was meant to guard — the third instance of that defect this suite has
+caught.
 
 A tool that silently passes on an empty directory is worth more scrutiny than
 the code it audits — it had been reporting success for a case where it had

@@ -81,6 +81,6 @@ than returning an answer grounded in state that no longer holds.
 See `Dcr::ask_with_consolidation`.
 
 ### ~~Workspace rebuild cost~~ (was #10)
-Measured rather than asserted: mean cold rebuild 1.66 ms against 27k tokens of history, versus
-0.14 ms warm. The invariant is real at this scale, with the caveat that the planning term inside
+Measured rather than asserted: mean cold rebuild 1.55 ms against 27k tokens of history, versus
+0.15 ms warm. The invariant is real at this scale, with the caveat that the planning term inside
 it has not been shown to be sub-linear. See [workspace rebuild](architecture/workspace-rebuild.md) and `bench --rebuild`.

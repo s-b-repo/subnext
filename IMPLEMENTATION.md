@@ -128,10 +128,10 @@ attention vs full history                 1x    3.4x    59x
 ```text
   turns   history   nodes   mean k   max k  correct   ingest    query
   turns   history   nodes   mean k   max k  correct   ingest     query ann query    ann k
-    100      8482     124    416.7     764      7/7    0.02s     0.6ms     0.6ms    416.7
-    300     27362     298    411.6     787      7/7    0.06s     1.6ms     1.3ms    451.7
-   1000     93442     911    398.6     793      7/7    0.22s     3.5ms     2.9ms    355.6
-   3000    283253    2661    413.3     795      7/7    1.04s    14.0ms     6.4ms    346.9
+    100      8482     124    416.7     764      7/7    0.02s     0.6ms     0.5ms    416.7
+    300     27362     298    411.6     787      7/7    0.05s     1.4ms     1.1ms    451.7
+   1000     93442     911    398.6     793      7/7    0.22s     3.3ms     2.6ms    355.6
+   3000    283253    2661    413.3     795      7/7    1.02s    12.6ms     5.8ms    346.9
 
 history grew 33x; active context grew 0.99x
 ```
