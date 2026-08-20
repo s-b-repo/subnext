@@ -224,9 +224,11 @@ is cheap, so it is measured:
 **Mean cold rebuild 1.55 ms; mean warm assembly 0.15 ms** (300 turns, 298 nodes).
 
 Cold drops every cached representation and reassembles from L0 alone; warm is
-the same query with caches populated. The 12x gap tracks how much L1 must be
-rebuilt — probes admitting only cached facts rebuild nothing and cost the same
-either way. Full table and caveats:
+the same query with caches populated. The roughly ten-fold gap tracks how much
+L1 must be rebuilt — probes admitting only cached facts rebuild nothing and cost the same
+either way. These are single-run figures on an idle machine; under load the same
+binary spans 1.98–4.18 ms cold and 0.15–1.02 ms warm, so reproduce the *ordering*
+rather than the milliseconds. Full table and caveats:
 [workspace rebuild](docs/architecture/workspace-rebuild.md).
 
 ---

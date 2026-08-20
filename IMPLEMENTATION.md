@@ -127,7 +127,6 @@ attention vs full history                 1x    3.4x    59x
 `cargo run --release -- bench --scaling --budget 800` — the `O(k + r)` claim:
 
 ```text
-  turns   history   nodes   mean k   max k  correct   ingest    query
   turns   history   nodes   mean k   max k  correct   ingest     query ann query    ann k
     100      8482     124    416.7     764      7/7    0.02s     0.6ms     0.5ms    416.7
     300     27362     298    411.6     787      7/7    0.05s     1.4ms     1.1ms    451.7

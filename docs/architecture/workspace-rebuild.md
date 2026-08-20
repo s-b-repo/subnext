@@ -60,11 +60,27 @@ durable; the workspace was never the source of anything.
   dropped, then the working set reassembled from L0 alone.
 - **Warm** is the same query with caches populated — what a second turn costs.
 
-The 12× gap is what the level cache buys, and it tracks how much L1 has to be
-rebuilt. The probes that admit only cached facts rebuild nothing and cost the
-same either way; the one that pulls long spans (21 L1 rebuilds) pays 5.2 ms and
-dominates the mean. Latencies are single-run and machine-dependent — they move
-by 10–15% between runs of the same binary — so the ratio is the durable part.
+The roughly ten-fold gap is what the level cache buys, and it tracks how much L1
+has to be rebuilt. The probes that admit only cached facts rebuild nothing and
+cost the same either way; the one that pulls long spans (21 L1 rebuilds)
+dominates the mean.
+
+**Do not read these latencies as tight.** An earlier version of this page said
+they move "by 10–15% between runs of the same binary". That was measured on an
+idle machine and is wrong under load. Re-running the same binary eight times
+while two other processes were building the same crate — load average 14 on 12
+cores — gave cold means of 1.98, 2.73, 2.82, 3.05 and 4.18 ms, and warm means
+from 0.15 to 1.02 ms. That is a 2× spread on cold and nearly 7× on warm, and the
+cold/warm ratio itself ranged from 4.6× to 12×.
+
+The table above is a single run on a quiet machine, and it is the right kind of
+number for the claim it supports — that rebuilding is cheap enough for the
+destroy-and-rebuild invariant to be real — but it is the wrong kind of number to
+compare against a later run on a busy one. **If you reproduce this and get 4 ms,
+you have not found a regression; you have found a loaded machine.** The durable
+claims are the ordering (cold exceeds warm by around an order of magnitude) and
+the shape (cost tracks L1 rebuilds, not history size), not the absolute
+milliseconds.
 
 ---
 
