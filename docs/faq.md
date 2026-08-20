@@ -19,11 +19,17 @@ Yes — which is why L0 is immutable and always available, and why every cached 
 spans. Loss is recoverable; see [open questions](open-questions.md) #3 for the unresolved part.
 
 **Is there code?**
-No. This repo is a specification wiki by design. See [roadmap](roadmap.md) non-goals.
+Yes — `dcr/` is a dependency-free reference implementation of this specification, and
+[implementation](implementation.md) explains what it enforces and what it measures. The wiki
+remains the design; the code exists to make the design falsifiable rather than to be depended on.
 
 **How would you know it's actually faster than RLM?**
-You wouldn't, yet. Phase 5 of the roadmap defines the benchmark that could falsify the claim. The
-`O(k + r)` target is a design goal, not a measured result.
+You wouldn't, yet. Phase 5 of the roadmap defines the benchmark that could falsify the claim.
+`python -m dcr bench --scaling` measures the part that is measurable without a competing system:
+attention cost per query stays flat (~415 tokens) while history grows 33x. That supports the
+`O(k + r)` shape for the active context; it is not a latency comparison against RLM, and the
+implementation's own retrieval is still a linear scan, which the cost model says must be
+sub-linear before the claim holds at scale.
 
 **Why two systems instead of one model?**
 Because the two jobs want opposite optimizations. Reasoning wants low latency, small context, high

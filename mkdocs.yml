@@ -23,6 +23,7 @@ nav:
       - Relevance Planner: architecture/relevance-planner.md
       - Decision Policy: architecture/decision-policy.md
       - Provenance: architecture/provenance.md
+  - Implementation: implementation.md
   - Comparison: comparison.md
   - Open questions: open-questions.md
   - Roadmap: roadmap.md

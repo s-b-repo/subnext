@@ -1,6 +1,13 @@
 # Dynamic Context Runtime (DCR)
 
-> Docs-only project. No implementation here — this is a specification and design wiki.
+> Specification wiki **plus a working implementation** of it.
+> The design lives in [`docs/`](docs/); the runtime lives in [`dcr/`](dcr/) —
+> see [IMPLEMENTATION.md](IMPLEMENTATION.md).
+
+```bash
+python -m dcr demo     # worked example: correction, exact quote, justification, recompute
+python -m dcr bench    # DCR vs full context vs sliding window
+```
 
 **Thesis:** RLMs (Recursive Language Models) don't solve context rot. They move the problem
 out of the transformer's fixed attention window and into a program. That is the right primitive,
@@ -72,9 +79,23 @@ current computation.
 - [Roadmap](docs/roadmap.md)
 - [FAQ](docs/faq.md)
 
+## Implementation
+
+`dcr/` is a dependency-free Python implementation of this specification: the
+immutable L0 store, the representation ladder, the typed memory graph with
+enforced provenance, the attention-budget knapsack, the relevance planner, the
+escalation protocol, speculative prefetch, and the telemetry the evaluation
+design asks for. See [IMPLEMENTATION.md](IMPLEMENTATION.md) for the module map,
+the measurements, and the honest limitations.
+
+Measured on a 300-turn synthetic incident transcript (27k tokens of history,
+`B_attention` = 1200): **457 tokens per query — 60x less attention than the full
+history — with `k` staying flat as history grows 33x.**
+Full numbers, scaling table, and caveats: [RESULTS.md](RESULTS.md).
+
 ## Status
 
-Specification stage. Contributions are docs, critiques, and worked examples —
-see [CONTRIBUTING.md](CONTRIBUTING.md).
+Specification plus reference implementation. Contributions are docs, critiques,
+worked examples, and code — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-License: [CC BY 4.0](LICENSE) for docs.
+License: [CC BY 4.0](LICENSE) for docs and code.

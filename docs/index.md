@@ -13,4 +13,5 @@ Start here, in order:
 9. [Cost model](concepts/cost-model.md)
 10. [Architecture overview](architecture/overview.md)
 11. [Two-system split](architecture/two-system-split.md) — Reasoner vs Memory Runtime
-12. [Comparison](comparison.md) · [Open questions](open-questions.md) · [Glossary](glossary.md)
+12. [Reference implementation](implementation.md) — the code, what it enforces, what it measures
+13. [Comparison](comparison.md) · [Open questions](open-questions.md) · [Glossary](glossary.md)

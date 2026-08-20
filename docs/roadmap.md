@@ -1,6 +1,9 @@
 # Roadmap
 
-Docs-only. Each phase's deliverable is a written specification, not code.
+Each phase's deliverable is a written specification. A reference implementation
+of the specified behaviour now lives in `dcr/` — see
+[implementation](implementation.md) — so each phase can be checked against
+running code rather than only argued about.
 
 ## Phase 0 — Framing (done)
 - Motivation, thesis, comparison to RLM/RAG.
@@ -35,5 +38,9 @@ Docs-only. Each phase's deliverable is a written specification, not code.
 - Deliverable: benchmark proposal that can falsify the `O(k + r)` claim.
 
 ## Non-goals
-- Shipping a library from this repo.
-- Claiming empirical speedups without the Phase 5 benchmark.
+- Claiming empirical speedups without the Phase 5 benchmark. The bundled
+  benchmark measures attention cost and answer correctness under a fixed
+  deterministic reasoner; it is not a latency comparison against RLM, and it
+  does not license the claim that DCR is faster.
+- Treating the reference implementation as production infrastructure. It is
+  there to make the specification falsifiable, not to be depended on.
