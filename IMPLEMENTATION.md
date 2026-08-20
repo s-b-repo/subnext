@@ -34,19 +34,23 @@ println!("{} ({} tokens)", answer.text, answer.tokens);
 println!("{}", rt.explain(&answer.cited[0])?);   // audit path down to raw spans
 ```
 
-> **On the Python in `dcr/`:** an earlier implementation of this same
-> specification, kept for reference. It is not the reference implementation any
-> more — the docs, the benchmark numbers and the CLI above all describe the Rust
-> in `src/`. It has since diverged: the integrity layer, the evidence hierarchy
-> and the wider baseline set are Rust-only, and keeping two implementations in
-> parity costs more than the second one is worth. On the shared subset the two
-> still agreed at the point they diverged (7/7 probes on the same 300-turn
-> benchmark), and Rust is roughly 5x faster on ingest and query. The token
-> counts are no longer comparable: the Rust extractor and planner have since
-> moved, so quoting a side-by-side figure would be a stale claim rather than a
-> measurement. Delete `dcr/`,
-> `tests/*.py`, `examples/quickstart.py` and `pyproject.toml` whenever you want
-> the repo to be Rust-only.
+> **The Python implementation has been removed.** An earlier implementation of
+> this same specification lived in `dcr/`. It is gone as of the commit that
+> added this note; `git log -- dcr/` still has all of it.
+>
+> It was removed rather than maintained because a second implementation that
+> disagrees with the first is worse than no second implementation. It had fallen
+> seven features behind — the planner's superseded-evidence guard, the
+> approximate index, pair coverage, the adversarial mutation set, the multi-hop
+> probe, the recency prefilter and the consolidation harness — and it still
+> served superseded values on a shape the Rust had been fixed for, so anyone
+> running it got quieter and wrong answers from a repo whose report says
+> otherwise.
+>
+> That hazard was not hypothetical. A write-up of this work quoted the Python's
+> figures while the report quoted the Rust's, and a reviewer reading the repo
+> reasonably concluded the ablation did not exist. One implementation, one set
+> of numbers.
 
 ---
 

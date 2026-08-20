@@ -394,7 +394,6 @@ level costing less than the one below it, every `Rejection` variant reachable.
 - **Pair coverage has the same conditioned numerator** as span coverage: a
   larger or adversarial probe set would raise it, and nothing tests whether it
   can rise faster than N.
-- **The Python implementation has drifted.** It has the extractor fixes and the
-  mutation probe; it does not have the planner's superseded-evidence guard, the
-  adversarial set, pair coverage, LSH, the multi-hop probe, the decay prefilter
-  or the consolidation harness.
+- ~~The Python implementation has drifted.~~ **Closed by removal.** It was seven
+  features behind and still served superseded values on a shape the Rust was
+  fixed for. Recoverable from git history; the repo is Rust-only.

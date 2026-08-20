@@ -27,10 +27,8 @@ benchmark suite whose results are reproducible offline with no API key.
   memory graph with enforced provenance, the attention-budget knapsack, the
   relevance planner, the escalation protocol, speculative prefetch, and
   telemetry.
-- **Python implementation** (`dcr/`, 4,350 lines, standard library only). Kept
-  as a second implementation for reference. Marked `linguist-vendored` so it
-  does not out-vote the Rust in GitHub's language statistics — excluded from the
-  badge rather than deleted.
+- **Python implementation** (`dcr/`, 4,350 lines, standard library only), as a
+  second implementation for reference. **Since removed** — see *Removed* below.
 - **`.context` container** (`context_store`): objects, checkpoints, and a hash
   chain, with `verify`, `checkpoint`, and `quarantine` commands.
 - **Bit-rot detection and repair** (`scrub`): `scrub [--repair]` detects
@@ -255,6 +253,25 @@ not. Every one came from a reader; `CREDITS.md` records who and what changed.
 | `bench --consolidate` | a write landing mid-turn. 7/7 holds, replanning fires 1/7, working set 461.9 → 492.9 |
 | `bench --poison` | positive control for the stale-fact metric |
 | grounding gate | correctness is now conditional on a complete audit path, not substring containment alone |
+
+### Removed
+
+- **The Python implementation** (`dcr/`, `tests/test_*.py`,
+  `examples/quickstart.py`, `pyproject.toml`, and the `linguist-vendored`
+  attribute that existed only to stop it out-voting the Rust in GitHub's
+  language statistics). Recoverable from git history.
+
+  It was removed rather than resynced because a second implementation that
+  disagrees with the first is worse than no second implementation. It had fallen
+  seven features behind — the planner's superseded-evidence guard, the
+  approximate index, pair coverage, the adversarial mutation set, the multi-hop
+  probe, the recency prefilter, the consolidation harness — and it still served
+  superseded values on a shape the Rust had been fixed for.
+
+  The hazard was demonstrated rather than theoretical: a public write-up of this
+  work quoted the Python's 456.6 tokens/query and 60× while the report quoted the
+  Rust's, and a reviewer reading the linked repo reasonably concluded the
+  ablation did not exist. One implementation, one set of numbers.
 
 ### Changed — the retrieval diagnosis was wrong
 

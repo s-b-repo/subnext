@@ -1,8 +1,2 @@
-# GitHub's language detection counts bytes, so the superseded Python copy in
-# dcr/ outvotes the Rust in src/ and the repo gets badged Python. src/ is the
-# reference implementation (see IMPLEMENTATION.md); dcr/ is kept for reference
-# only, so it is excluded from the language statistics rather than deleted.
-dcr/** linguist-vendored
-
 # Generated: the PDF is built from paper/paper.frag.html by paper/build.py.
 paper/*.pdf binary linguist-generated

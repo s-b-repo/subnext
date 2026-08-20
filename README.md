@@ -142,4 +142,4 @@ worked examples, and code — see [CONTRIBUTING.md](CONTRIBUTING.md).
 Several results here exist because readers proposed the instrument. Who changed
 which claim, which artifact moved, and what stayed disputed: [CREDITS.md](CREDITS.md).
 
-License: [MIT](LICENSE) for the code in `src/`, `dcr/`, `tests/`, and `examples/`; [CC BY 4.0](LICENSE-DOCS) for the specification in `docs/` and the technical report in `paper/`.
+License: [MIT](LICENSE) for the code in `src/`, `tests/`, and `examples/`; [CC BY 4.0](LICENSE-DOCS) for the specification in `docs/` and the technical report in `paper/`.
