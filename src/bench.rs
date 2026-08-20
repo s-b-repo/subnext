@@ -852,7 +852,16 @@ pub fn run_scaling(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
         }
         let ann_ms = ann_started.elapsed().as_secs_f64() * 1000.0 / corpus.probes.len() as f64;
         let ann_report = ann.telemetry.report();
-        debug_assert_eq!(ann_correct, correct, "ANN changed correctness");
+        // Not debug_assert: every benchmark here runs --release, where
+        // debug assertions are compiled out, so this check would have been a
+        // control that cannot fire sitting inside the table that reports the
+        // result. If the approximate path ever diverges, the row is wrong and
+        // should not be printed.
+        assert_eq!(
+            ann_correct, correct,
+            "approximate retrieval changed correctness at {turns} turns \
+             ({ann_correct} vs {correct}); Table 4's equality claim is void"
+        );
         let history = estimate_tokens(&corpus.text());
         println!(
             "{turns:>7} {history:>9} {:>7} {:>8.1} {:>7} {:>8} {:>7.2}s {:>7.1}ms {:>7.1}ms {:>8.1}",
@@ -1159,8 +1168,8 @@ fn run_mutation_set(
         set.iter().map(|m| m.references.len()).sum::<usize>()
     );
     let header = format!(
-        "{:<24} {:>10} {:>13} {:>11} {:>11}   {}",
-        "variant", "corrected", "stale served", "edge shown", "guard fired", "notes"
+        "{:<24} {:>10} {:>13} {:>11} {:>11} {:>8}   {}",
+        "variant", "corrected", "stale served", "edge shown", "guard fired", "stale k", "notes"
     );
     println!("{}", "-".repeat(header.len()));
     println!("{header}");
@@ -1247,12 +1256,13 @@ fn run_mutation_set(
             control_fired = true;
         }
         println!(
-            "{:<24} {:>8}/{n} {:>11}/{n} {:>9}/{n} {:>9}/{n}   {}",
+            "{:<24} {:>8}/{n} {:>11}/{n} {:>9}/{n} {:>9}/{n} {:>8}   {}",
             variant.name,
             corrected,
             stale,
             edges,
             guarded,
+            marked,
             {
                 let mut notes = Vec::new();
                 for c in &stale_cases {
