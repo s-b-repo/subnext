@@ -96,33 +96,6 @@ ol.refs em{color:#a9c8ee;font-style:italic}
 }
 .footnotes p{margin:0}
 
-/* download strip */
-.paper-actions{
-  display:flex;flex-wrap:wrap;gap:.8rem;align-items:center;
-  margin:1.4rem 0 0;
-}
-.paper-dl{
-  display:inline-flex;align-items:center;gap:.55rem;
-  font-family:var(--font-mono);font-size:.82rem;letter-spacing:.04em;
-  background:var(--acc);color:#fff;border-radius:10px;padding:.7rem 1.1rem;
-  border:1px solid var(--acc);transition:background .18s ease,transform .18s ease;
-}
-.paper-dl:hover{background:var(--acc-deep);transform:translateY(-1px)}
-.paper-alt{
-  display:inline-flex;align-items:center;gap:.5rem;
-  font-family:var(--font-mono);font-size:.82rem;color:var(--text);
-  border:1px solid var(--line);border-radius:10px;padding:.7rem 1.1rem;
-  transition:border-color .18s ease,color .18s ease;
-}
-.paper-alt:hover{border-color:var(--acc);color:#dbe9ff}
-.paper-facts{
-  display:flex;flex-wrap:wrap;gap:1.4rem;margin:1.5rem 0 0;
-  font-family:var(--font-mono);font-size:.74rem;letter-spacing:.06em;
-  text-transform:uppercase;color:var(--faint);
-}
-.paper-facts b{display:block;font-size:.95rem;letter-spacing:0;text-transform:none;color:#cddff5;margin-top:.15rem}
-
 @media (max-width:640px){
   .paper-body table{font-size:.8rem}
-  .paper-facts{gap:1rem}
 }

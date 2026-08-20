@@ -595,3 +595,297 @@ pub fn run_scaling(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
     println!("nodes. The cost model needs sub-linear retrieval (ANN index) to hold at scale.");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Mutation-and-correction probe
+// ---------------------------------------------------------------------------
+
+/// One mutation case: a fact planted early, referenced repeatedly so it
+/// accumulates dependents, then superseded late.
+///
+/// The point of the repeated references is that a correction arriving at 85% of
+/// the way through has to overcome whatever weight the original accumulated —
+/// graph proximity, read-through, and the dependents built on top of it. A
+/// correction to an isolated leaf is the easy case and proves little.
+pub struct Mutation {
+    pub label: &'static str,
+    pub query: &'static str,
+    /// Ground truth: the value that must no longer be served.
+    pub stale: &'static str,
+    /// Ground truth: the value that must be served instead.
+    pub live: &'static str,
+    establish: &'static str,
+    references: &'static [&'static str],
+    correction: &'static str,
+}
+
+pub const MUTATIONS: &[Mutation] = &[
+    Mutation {
+        label: "datastore (4 dependents)",
+        query: "what is the primary datastore?",
+        stale: "postgres-11",
+        live: "postgres-15",
+        establish: "The primary datastore is postgres-11 on host db-alpha.",
+        references: &[
+            "Nightly backup job targets the primary datastore postgres-11 on db-alpha; retention is 14 days.",
+            "The read replica lags the primary datastore postgres-11 by under 200ms during business hours.",
+            "Schema migration 0042 was applied against postgres-11 and verified on the replica.",
+            "Capacity note: postgres-11 on db-alpha is at 61 percent disk with no growth alarm set.",
+        ],
+        correction: "Correction: the primary datastore was migrated and is now postgres-15 on host db-omega.",
+    },
+    Mutation {
+        label: "autoscaler threshold (3 dependents)",
+        query: "what is the autoscaler threshold?",
+        stale: "65 percent",
+        live: "80 percent",
+        establish: "The autoscaler threshold is 65 percent CPU.",
+        references: &[
+            "Load test 19 held the fleet just under the autoscaler threshold of 65 percent CPU for forty minutes.",
+            "The scale-out event at 03:12 fired because sustained CPU crossed 65 percent.",
+            "Cost review flagged that a 65 percent trigger keeps roughly two extra nodes warm overnight.",
+        ],
+        correction: "Update: the autoscaler threshold is 80 percent CPU after the cost review.",
+    },
+    Mutation {
+        label: "failover region (3 dependents)",
+        query: "what is the failover region?",
+        stale: "eu-west-2",
+        live: "eu-central-1",
+        establish: "The failover region is eu-west-2.",
+        references: &[
+            "The disaster recovery runbook fails traffic over to eu-west-2 and expects a 12 minute RTO.",
+            "Cross-region replication to eu-west-2 was re-enabled after the maintenance window.",
+            "The last failover drill exercised eu-west-2 and completed inside the RTO budget.",
+        ],
+        correction: "Correction: the failover region is eu-central-1, eu-west-2 is being decommissioned.",
+    },
+    Mutation {
+        label: "escalation extension (2 dependents)",
+        query: "what is the escalation extension?",
+        stale: "4412",
+        live: "4419",
+        establish: "The escalation extension is 4412 for the platform on-call rota.",
+        references: &[
+            "Page at 02:40 was routed to extension 4412 and acknowledged in ninety seconds.",
+            "The incident bridge dials extension 4412 before opening a severity review.",
+        ],
+        correction: "Update: the escalation extension is 4419, the rota moved to a new bridge.",
+    },
+];
+
+/// Interleave the mutation cases into a long transcript: each fact is
+/// established early, referenced across the first 60%, and corrected at 85%.
+pub fn build_mutation_corpus(turns: usize) -> Corpus {
+    let mut docs: Vec<(String, String)> = Vec::new();
+    for (m_idx, m) in MUTATIONS.iter().enumerate() {
+        docs.push((format!("m{m_idx:02}e"), m.establish.to_string()));
+    }
+
+    let established = docs.len();
+    let correct_at = (turns as f64 * 0.85) as usize;
+    // References are spread across the first 60% so the originals are still
+    // accumulating dependents well after they were planted.
+    let ref_span_end = (turns as f64 * 0.60) as usize;
+    let mut refs: Vec<(usize, &str)> = Vec::new();
+    let total_refs: usize = MUTATIONS.iter().map(|m| m.references.len()).sum();
+    let mut slot = 0usize;
+    for m in MUTATIONS {
+        for r in m.references {
+            let at = established
+                + ((ref_span_end.saturating_sub(established)) * slot)
+                    / total_refs.max(1);
+            refs.push((at.max(established), r));
+            slot += 1;
+        }
+    }
+
+    for i in established..turns.max(established + 1) {
+        let id = format!("t{i:03}");
+        // corrections land in consecutive slots starting at 85%
+        let corr = MUTATIONS
+            .iter()
+            .enumerate()
+            .find(|(k, _)| correct_at + k == i)
+            .map(|(_, m)| m.correction);
+        if let Some(text) = corr {
+            docs.push((id, text.to_string()));
+            continue;
+        }
+        let planted: Vec<&str> = refs
+            .iter()
+            .filter(|(at, _)| *at == i)
+            .map(|(_, r)| *r)
+            .collect();
+        if !planted.is_empty() {
+            docs.push((id, planted.join("\n\n")));
+            continue;
+        }
+        docs.push((id, NOISE[i % NOISE.len()].replace("{n}", &i.to_string())));
+    }
+
+    Corpus {
+        docs,
+        probes: Vec::new(),
+    }
+}
+
+/// Measure what the main benchmark cannot: whether a correction is actually
+/// served once the original has dependents, and whether the runtime can show
+/// the supersession edge that justifies it.
+///
+/// Both measurements are made against ground truth held by the corpus, not
+/// against the runtime's own `Status::Stale` marking. That distinction is the
+/// whole point. `stale_fact_read_rate` counts entries whose node the runtime
+/// has *marked* stale, so it cannot fire in the configuration where marking is
+/// switched off — a control that cannot fire and a control that passes are
+/// indistinguishable. Checking the answer text for a value the corpus knows was
+/// superseded fires in every configuration, so the `no supersession` row below
+/// is a live negative control rather than a decorative one.
+pub fn run_mutation_probe(turns: usize, budget: usize) -> Result<(), DcrError> {
+    struct Variant {
+        name: &'static str,
+        apply: fn(&mut Dcr),
+    }
+    let variants = [
+        Variant {
+            name: "full runtime",
+            apply: |_| {},
+        },
+        Variant {
+            name: "no supersession",
+            apply: |rt| rt.indexer.supersede_on_conflict = false,
+        },
+        Variant {
+            name: "no reference linking",
+            apply: |rt| rt.indexer.reference_linking = false,
+        },
+        Variant {
+            name: "no graph expansion",
+            apply: |rt| rt.planner.max_depth = 0,
+        },
+    ];
+
+    let corpus = build_mutation_corpus(turns);
+    let n = MUTATIONS.len();
+    println!(
+        "MUTATION AND CORRECTION - {turns} turns, {} tokens of history, B_attention = {budget}",
+        estimate_tokens(&corpus.text())
+    );
+    println!(
+        "{n} facts established early, referenced {} times in total, superseded at 85% of history",
+        MUTATIONS.iter().map(|m| m.references.len()).sum::<usize>()
+    );
+    let header = format!(
+        "{:<24} {:>10} {:>13} {:>11} {:>9}   {}",
+        "variant", "corrected", "stale served", "edge shown", "stale k", "notes"
+    );
+    println!("{}", "-".repeat(header.len()));
+    println!("{header}");
+    println!("{}", "-".repeat(header.len()));
+
+    let mut control_fired = false;
+    let mut served: Vec<(&str, String, usize)> = Vec::new();
+    for variant in variants {
+        let mut runtime = Dcr::new(budget);
+        (variant.apply)(&mut runtime);
+        for (doc_id, text) in &corpus.docs {
+            runtime.ingest(text, Some(doc_id))?;
+        }
+        let mut reasoner = LocalReasoner::new();
+        let (mut corrected, mut stale, mut edges) = (0usize, 0usize, 0usize);
+        let mut stale_cases: Vec<&str> = Vec::new();
+        let mut missed: Vec<&str> = Vec::new();
+
+        for m in MUTATIONS {
+            let answer = runtime.ask_with(m.query, None, &mut reasoner);
+            let text = answer.text.to_lowercase();
+            let live_v = m.live.to_lowercase();
+            let stale_v = m.stale.to_lowercase();
+
+            if text.contains(&live_v) {
+                corrected += 1;
+            } else if !text.contains(&stale_v) {
+                // Neither value: the planner served something unrelated, which
+                // is a different failure from serving the superseded value and
+                // is worth separating.
+                missed.push(m.label);
+            }
+            if text.contains(&stale_v) {
+                stale += 1;
+                stale_cases.push(m.label);
+            }
+            // Can the runtime show *why* the live value wins? A cited node must
+            // supersede a node that still carries the stale value.
+            let shown = answer.cited.iter().any(|id| {
+                runtime.graph.get(id).is_some_and(|node| {
+                    node.meta.supersedes.iter().any(|old| {
+                        runtime
+                            .graph
+                            .get(old)
+                            .is_some_and(|o| o.value.to_lowercase().contains(&stale_v))
+                    })
+                })
+            });
+            if shown {
+                edges += 1;
+            }
+            if variant.name == "full runtime" {
+                served.push((m.label, answer.text.clone(), answer.tokens));
+            }
+        }
+
+        let report = runtime.telemetry.report();
+        let marked = match report.stale_fact_read_rate {
+            Some(v) => format!("{v:.2}"),
+            None => "n/a".to_string(),
+        };
+        if variant.name == "no supersession" && stale > 0 {
+            control_fired = true;
+        }
+        println!(
+            "{:<24} {:>8}/{n} {:>11}/{n} {:>9}/{n} {:>9}   {}",
+            variant.name,
+            corrected,
+            stale,
+            edges,
+            marked,
+            {
+                let mut notes = Vec::new();
+                for c in &stale_cases {
+                    notes.push(format!("STALE {c}"));
+                }
+                for c in &missed {
+                    notes.push(format!("no answer {c}"));
+                }
+                if notes.is_empty() {
+                    "-".to_string()
+                } else {
+                    notes.join("; ")
+                }
+            }
+        );
+    }
+    println!("{}", "-".repeat(header.len()));
+    println!(
+        "'stale k' is the runtime's own stale_fact_read_rate, shown for comparison: it stays 0\n\
+         even on the row where superseded values are provably served, because disabling\n\
+         supersession means nothing is ever marked. The 'stale served' column is ground truth."
+    );
+    println!("\nwhat the full runtime served:");
+    for (label, text, tokens) in &served {
+        let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let shown: String = one_line.chars().take(96).collect();
+        println!("  {label:<32} {tokens:>4} tok  {shown}");
+    }
+    println!();
+    if control_fired {
+        println!("negative control FIRED: the instrument can distinguish a pass from a no-op.");
+    } else {
+        println!(
+            "negative control DID NOT FIRE: 'no supersession' served no stale value, so this\n\
+             run does not establish that the probe can detect the failure it tests for."
+        );
+    }
+    Ok(())
+}

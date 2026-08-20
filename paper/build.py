@@ -54,7 +54,7 @@ def masthead(for_print: bool) -> str:
   <h1>{TITLE}</h1>
   <p class="subtitle">{SUBTITLE}</p>
   <p class="byline"><b>{AUTHOR}</b> &nbsp;<span>&middot;&nbsp; {AFFIL}</span></p>
-  <p class="affil">Specification, implementation and experiments: github.com/s-b-repo/subnext</p>
+  <p class="affil">Specification, implementation and experiments in the subnext project repository</p>
 </header>"""
 
 
@@ -130,17 +130,16 @@ def build_site(site_dir: Path) -> Path:
       <h1 class="reveal">{TITLE}</h1>
       <p class="page-sub reveal">{SUBTITLE}</p>
       <p class="article-meta reveal">{REPORT_ID} &nbsp;&middot;&nbsp; By <b>{AUTHOR}</b> &nbsp;&middot;&nbsp; {DATE}</p>
-      <div class="paper-actions reveal">
-        <a class="paper-dl" href="papers/{PDF_NAME}" download>Download PDF <span aria-hidden="true">&darr;</span></a>
-        <a class="paper-alt" href="https://github.com/s-b-repo/subnext">Source &amp; experiments <span aria-hidden="true">&rarr;</span></a>
-        <a class="paper-alt" href="research.html">All research <span aria-hidden="true">&rarr;</span></a>
+      <div class="hero-cta reveal">
+        <a class="btn btn-primary" href="papers/{PDF_NAME}" download>Download PDF <span aria-hidden="true">&darr;</span></a>
+        <a class="btn btn-ghost" href="research.html">All research <span aria-hidden="true">&rarr;</span></a>
       </div>
-      <div class="paper-facts reveal">
-        <span>Working set<b>467 tokens</b></span>
-        <span>vs full history<b>59x less</b></span>
-        <span>Probes answered<b>7 of 7</b></span>
-        <span>Implementation<b>Rust, 0 deps</b></span>
-      </div>
+      <ul class="hero-stats reveal" aria-label="At a glance">
+        <li><b>467</b><span>tokens per query</span></li>
+        <li><b>59&times;</b><span>less than full history</span></li>
+        <li><b>7 / 7</b><span>probes answered</span></li>
+        <li><b>Rust</b><span>zero dependencies</span></li>
+      </ul>
     </div>
   </section>
 

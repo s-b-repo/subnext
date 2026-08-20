@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use dcr::bench::{run_ablation, run_benchmark, run_scaling, run_sweep};
+use dcr::bench::{run_ablation, run_benchmark, run_mutation_probe, run_scaling, run_sweep};
 use dcr::demo::run_demo;
 use dcr::graph::DcrError;
 use dcr::runtime::Dcr;
@@ -38,6 +38,7 @@ commands:
                               DCR vs full context vs sliding window
         --scaling             does k stay flat while history grows?
         --ablate              which mechanism carries which probe?
+        --mutate              is a correction served once the original has dependents?
         --sweep               correctness and cost against B_attention
 
 options:
@@ -223,6 +224,8 @@ fn run() -> Result<(), String> {
             let has = |name: &str| args.flags.iter().any(|f| f == name);
             if has("--scaling") {
                 run_scaling(&[100, 300, 1000, 3000], args.budget).map_err(to_err)?;
+            } else if has("--mutate") {
+                run_mutation_probe(args.turns, args.budget).map_err(to_err)?;
             } else if has("--ablate") {
                 run_ablation(args.turns, args.budget).map_err(to_err)?;
             } else if has("--sweep") {

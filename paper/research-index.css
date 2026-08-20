@@ -1,67 +1,13 @@
-/* Research index — built to list many reports; reads correctly with one. */
+/* Research index. The page is built from the site's own components
+   (card, resource-card, hero-cta, hero-stats, btn); this only adds a little
+   emphasis to the featured report card. */
 
-.lead-report{
-  background:var(--surface);border:1px solid var(--line-soft);border-radius:var(--radius);
-  padding:clamp(1.3rem,3vw,2.1rem);box-shadow:var(--shadow);position:relative;overflow:hidden;
-}
-.lead-report::before{
-  content:"";position:absolute;inset:0 auto 0 0;width:3px;
-  background:linear-gradient(180deg,var(--acc),transparent);
-}
-.rep-meta{
-  display:flex;flex-wrap:wrap;gap:.9rem;align-items:center;
-  font-family:var(--font-mono);font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;
-  color:var(--faint);margin-bottom:.9rem;
-}
-.rep-id{color:var(--acc);border:1px solid var(--line);border-radius:6px;padding:.2rem .5rem}
-.rep-tag{border:1px solid var(--line-soft);border-radius:6px;padding:.2rem .5rem}
+.lead-report{padding:clamp(1.4rem,3vw,2.2rem)}
+.lead-report .res-meta{margin-bottom:1rem}
 .lead-report h3{
-  font-family:var(--font-display);font-size:clamp(1.3rem,3vw,1.85rem);line-height:1.2;
-  margin:0 0 .7rem;color:#e2eeff;
+  font-family:var(--font-display);font-size:clamp(1.3rem,3vw,1.9rem);line-height:1.2;
+  margin:0 0 .8rem;color:#e2eeff;
 }
-.lead-report .rep-sub{color:var(--muted);margin:0 0 1.1rem;max-width:70ch}
-.rep-numbers{
-  display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1rem;
-  border-block:1px solid var(--line-soft);padding:1.1rem 0;margin:0 0 1.2rem;
-}
-.rep-numbers div{font-family:var(--font-mono);font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:var(--faint)}
-.rep-numbers b{display:block;font-family:var(--font-display);font-size:1.45rem;letter-spacing:0;text-transform:none;color:#dbe9ff;margin-bottom:.2rem}
-.rep-actions{display:flex;flex-wrap:wrap;gap:.7rem}
-.rep-dl{
-  display:inline-flex;align-items:center;gap:.5rem;font-family:var(--font-mono);font-size:.82rem;
-  background:var(--acc);color:#fff;border:1px solid var(--acc);border-radius:10px;padding:.7rem 1.1rem;
-  transition:background .18s ease,transform .18s ease;
-}
-.rep-dl:hover{background:var(--acc-deep);transform:translateY(-1px)}
-.rep-ghost{
-  display:inline-flex;align-items:center;gap:.5rem;font-family:var(--font-mono);font-size:.82rem;
-  color:var(--text);border:1px solid var(--line);border-radius:10px;padding:.7rem 1.1rem;
-  transition:border-color .18s ease,color .18s ease;
-}
-.rep-ghost:hover{border-color:var(--acc);color:#dbe9ff}
-
-/* the index table — one row per report, scales to many */
-.rep-list{display:flex;flex-direction:column;gap:0;border-top:1px solid var(--line-soft)}
-.rep-row{
-  display:grid;grid-template-columns:minmax(0,1fr) auto;gap:1rem 1.4rem;align-items:start;
-  padding:1.3rem 0;border-bottom:1px solid var(--line-soft);
-}
-.rep-row h3{font-family:var(--font-display);font-size:1.12rem;margin:.35rem 0 .45rem;color:#dbe9ff}
-.rep-row p{margin:0;color:var(--muted);font-size:.94rem;max-width:66ch}
-.rep-row-links{display:flex;flex-direction:column;gap:.45rem;text-align:right;font-family:var(--font-mono);font-size:.78rem}
-.rep-row-links a{color:var(--acc);white-space:nowrap}
-.rep-row-links a:hover{text-decoration:underline}
-.rep-row-links span{color:var(--faint)}
-@media (max-width:700px){
-  .rep-row{grid-template-columns:1fr}
-  .rep-row-links{flex-direction:row;flex-wrap:wrap;text-align:left;gap:1rem}
-}
-
-.standards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:1.1rem}
-.standards .card{padding:1.3rem}
-.standards h3{font-family:var(--font-display);font-size:1.02rem;margin:0 0 .5rem;color:#dbe9ff}
-.standards p{margin:0;color:var(--muted);font-size:.92rem}
-.standards .num{
-  font-family:var(--font-mono);font-size:.7rem;letter-spacing:.14em;color:var(--acc);
-  display:block;margin-bottom:.6rem;
-}
+.lead-report > p{color:var(--muted);max-width:72ch;margin:0 0 1.2rem}
+.lead-report .hero-stats{margin-top:1.4rem;margin-bottom:1.4rem}
+.lead-report .hero-cta{margin-top:0}
