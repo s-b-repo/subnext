@@ -8,12 +8,12 @@ cargo run --release -- bench --baselines            # DCR vs RAG / summarize / r
 cargo run --release -- bench --scaling --budget 800 # the flat-k table
 cargo run --release -- bench --rebuild              # what does a workspace rebuild cost?
 cargo run --release -- bench --tamper               # can the container detect tampering?
-cargo test                                          # 151 tests, ~14s
+cargo test                                          # 152 tests, ~14s
 ```
 
 Every benchmark is deterministic and offline. No API key, no network.
 
-**Measured at `3821cc5`.** Benchmark numbers are pinned to a commit on purpose:
+**Measured at `8b7162f`.** Benchmark numbers are pinned to a commit on purpose:
 they move whenever retrieval, extraction or the planner moves, and a table
 without a revision attached is a table nobody can reproduce. Re-run the commands
 above after any change to `src/` and update this file with what they print —
@@ -163,6 +163,47 @@ Same probes, same `B_attention = 800`, history scaled 33x:
 | 300 | 27,362 | 298 | 411.6 | 787 | 7/7 | 0.05s | 1.4ms | 1.1ms | 451.7 |
 | 1,000 | 93,442 | 911 | 398.6 | 793 | 7/7 | 0.22s | 3.3ms | 2.6ms | 355.6 |
 | 3,000 | 283,253 | 2,661 | 413.3 | 795 | 7/7 | 1.02s | 12.6ms | 5.8ms | 346.9 |
+
+### The range this table covers, and the range it does not
+
+The standard corpus emits **21 distinct documents at any size**. Growing it grows
+the transcript's *length* at fixed lexical *variety* — at 3,000 turns each of its
+eight distractor templates already appears 373 times. Flat `k` here shows the
+planner does not degrade with length at constant difficulty. It is not evidence
+that the working set holds as the retrieval problem gets harder, and a bigger
+token count from this generator would overstate what was asked of the system.
+
+`bench --diverse` answers the harder question on a second generator: distractors
+drawn from four vocabularies by mixed-radix decomposition, 18,432 distinct
+documents rather than eight templates. Added alongside the standard corpus, never
+replacing it — every other figure here comes from the standard one.
+
+| turns | history | distinct | nodes | mean k | correct | ingest | query |
+|---:|---:|---:|---:|---:|:---:|---:|---:|
+| 3,000 | 150,648 | 3,000 | 2,032 | 196 | 7/7 | 0.4s | 2ms |
+| 10,000 | 512,964 | 10,000 | 6,762 | 220 | 7/7 | 4s | 5ms |
+| 30,000 | 1,564,065 | 18,445 | 18,473 | 197 | 7/7 | 15s | 11ms |
+| 80,000 | **4,191,322** | 18,445 | 48,651 | **235** | **7/7** | 178s | 33ms |
+
+**4.19 million tokens of history, 48,651 state nodes, 235 tokens per query, 7/7.**
+Across a 28x growth on this corpus the working set moves 196 → 235.
+
+Two limits, stated rather than left to be found. The generator exhausts its
+vocabulary at 18,432 combinations, so past ~18,000 turns documents begin to
+repeat — the 80,000-turn row averages about four copies of each, far better than
+21 and not unbounded. And the probe set is the same seven questions at every
+size, so this measures whether a fixed retrieval task stays cheap as the haystack
+grows, not whether `k` holds as the number of things worth knowing grows.
+
+### The cost result revises the one above it
+
+Standard corpus at 30,000 turns: 226s ingest, 169ms query. Diverse corpus at the
+same document count: 15s and 11ms. Ingest on the standard generator is dominated
+by comparing each arriving document against thousands of near-duplicates, so the
+super-quadratic growth first attributed to the linking passes is largely a
+property of the corpus. An inverted index built to fix it was slower at scale
+*and* behaviour-changing — 457.1 tokens per query against 461.9 — and was
+reverted rather than published.
 
 History grew **33x**; active context grew **0.99x**, and accuracy held at 7/7 at
 every size. That is the `O(k + r)` shape from the cost model, measured rather

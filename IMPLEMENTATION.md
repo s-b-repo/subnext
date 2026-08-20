@@ -20,7 +20,8 @@ cargo run --release -- demo            # worked example through all four ladder 
 cargo run --release -- bench           # DCR vs full context vs sliding window
 cargo run --release -- bench --scaling --budget 800   # does k stay flat while N grows?
 cargo run --release -- bench --mutate  # is a correction served once the original has dependents?
-cargo test                             # 151 tests
+cargo run --release -- bench --diverse # scaling on a varied corpus, to 4.19M tokens
+cargo test                             # 152 tests
 ```
 
 ```rust
