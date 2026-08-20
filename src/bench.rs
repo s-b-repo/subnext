@@ -533,6 +533,155 @@ pub fn run_sweep(turns: usize, budgets: &[usize]) -> Result<(), DcrError> {
     Ok(())
 }
 
+/// Positive control for `stale_fact_read_rate`.
+///
+/// A zero is only evidence if the run could have produced nonzero. This builds
+/// a run that *can*: a derived value is computed, its input is then corrected
+/// so the derivation goes stale, and a probe asks for exactly that stale value.
+/// The expected outcomes are written down here, before execution, per the
+/// critique that motivated this control:
+///
+///   guard ON  (production) : stale node skipped -> stale_fact_read_rate = 0.0
+///   guard OFF (bypassed)   : stale node admitted -> stale_fact_read_rate = 1.0
+///
+/// If the OFF run does not reach 1.0, the metric is dead and the ON zero means
+/// nothing. If ON is not 0.0, the guard leaks. Only ON=0 with OFF=1 licenses
+/// reading the production zero as a fired guard.
+pub fn run_poison(budget: usize) -> Result<(), DcrError> {
+    fn scenario(budget: usize, admit_stale: bool) -> Result<f64, DcrError> {
+        let mut rt = Dcr::new(budget);
+        rt.planner.admit_stale = admit_stale;
+        rt.register("incident_cost", |inputs| {
+            let get = |n: &str| {
+                inputs
+                    .iter()
+                    .find(|(k, _)| k == n)
+                    .map(|(_, v)| *v)
+                    .unwrap_or(0.0)
+            };
+            get("rate") * get("hours")
+        });
+        rt.ingest("The hourly rate is 180 USD.", Some("t1"))?;
+        rt.ingest("The incident lasted 4 hours.", Some("t2"))?;
+        let rate = *rt.graph.by_key("hourly.rate", true).last().unwrap();
+        let deps = vec![rt.graph.node(rate).id.clone()];
+        rt.compute(
+            "incident_cost",
+            vec![("rate".into(), 180.0), ("hours".into(), 4.0)],
+            deps,
+            Some("incident.cost"),
+        )?;
+        // Poison: correct the input. The derivation now depends on a superseded
+        // fact, so it is marked stale.
+        rt.ingest("Correction: the hourly rate is 210 USD.", Some("t3"))?;
+        let cost = rt.graph.by_key("incident.cost", true)[0];
+        assert_eq!(
+            rt.graph.node(cost).status.as_str(),
+            "stale",
+            "the derivation must be stale for this control to mean anything"
+        );
+        let mut reasoner = LocalReasoner::new();
+        rt.ask_with("what is the incident cost?", None, &mut reasoner);
+        Ok(rt.telemetry.report().stale_fact_read_rate.unwrap_or(0.0))
+    }
+
+    let line = "-".repeat(68);
+    println!("{line}");
+    println!("STALE-FACT POSITIVE CONTROL");
+    println!("{line}");
+    println!("scenario: a derived value goes stale after its input is corrected,");
+    println!("          then a probe asks for exactly that value.\n");
+    println!(
+        "  {:<26} {:>10} {:>10} {:>8}",
+        "run", "expected", "measured", "verdict"
+    );
+    println!("  {}", "-".repeat(58));
+    let on = scenario(budget, false)?;
+    let off = scenario(budget, true)?;
+    let row = |name: &str, expected: f64, measured: f64| {
+        let ok = (expected - measured).abs() < 1e-9;
+        println!(
+            "  {:<26} {:>10.1} {:>10.1} {:>8}",
+            name,
+            expected,
+            measured,
+            if ok { "PASS" } else { "FAIL" }
+        );
+        ok
+    };
+    let a = row("guard ON (production)", 0.0, on);
+    let b = row("guard OFF (bypassed)", 1.0, off);
+    println!("{line}");
+    if a && b {
+        println!("Both controls pass: the metric CAN return nonzero, and the guard drove");
+        println!("it to zero. The production 0.0 is a fired guard, not an unexercised one.");
+    } else {
+        println!("A control failed: do not read the production zero as evidence.");
+    }
+    println!("{line}");
+    Ok(())
+}
+
+/// Read coverage across a growing history — the offline, unconditioned metric.
+///
+/// Answers the question the probe-based table cannot: as `N` grows, does the
+/// set of spans ever assembled grow with it, or stay flat while the unread
+/// region grows linearly? Coverage is measured after replaying the fixed probe
+/// set at each size.
+pub fn run_coverage(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
+    println!(
+        "{:>7} {:>9} {:>9} {:>10} {:>12}",
+        "turns", "spans N", "assembled", "coverage", "never seen"
+    );
+    println!("{}", "-".repeat(52));
+    let mut first: Option<(usize, usize)> = None;
+    let mut last = (0usize, 0usize, 0usize);
+    for &turns in sizes {
+        let corpus = build_corpus(turns);
+        let mut rt = Dcr::new(budget);
+        for (doc_id, text) in &corpus.docs {
+            rt.ingest(text, Some(doc_id))?;
+        }
+        let mut reasoner = LocalReasoner::new();
+        for probe in &corpus.probes {
+            rt.ask_with(probe.query, None, &mut reasoner);
+        }
+        let cov = rt.coverage();
+        println!(
+            "{turns:>7} {:>9} {:>9} {:>9.1}% {:>12}",
+            cov.total_spans,
+            cov.assembled_spans,
+            cov.fraction * 100.0,
+            cov.total_spans - cov.assembled_spans
+        );
+        if first.is_none() {
+            first = Some((cov.total_spans, cov.assembled_spans));
+        }
+        last = (
+            cov.total_spans,
+            cov.assembled_spans,
+            cov.total_spans - cov.assembled_spans,
+        );
+    }
+    println!("{}", "-".repeat(52));
+    if let Some((n0, a0)) = first {
+        let n_growth = last.0 as f64 / n0.max(1) as f64;
+        let a_growth = last.1 as f64 / a0.max(1) as f64;
+        println!("history (N) grew {n_growth:.0}x; spans ever shown at L0 grew {a_growth:.1}x.",);
+        println!("Coverage counts L0 only: the sole level that renders a span's actual bytes.");
+        println!("A fixed probe set surfaces a roughly constant handful of spans, so the count");
+        println!(
+            "stays flat while the unread region ({} spans here) grows with the history and",
+            last.2
+        );
+        println!("the covered fraction collapses toward zero. This is the dual cost of bounded");
+        println!("attention that the probe-based table cannot show: the runtime answers from");
+        println!("compact facts without ever surfacing most of the history's actual content, so");
+        println!("a span whose specifics silently governed an answer can never appear in a probe.");
+    }
+    Ok(())
+}
+
 /// Does `k` stay flat while `N` grows? That is the whole claim.
 pub fn run_scaling(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
     println!(
@@ -693,8 +842,7 @@ pub fn build_mutation_corpus(turns: usize) -> Corpus {
     for m in MUTATIONS {
         for r in m.references {
             let at = established
-                + ((ref_span_end.saturating_sub(established)) * slot)
-                    / total_refs.max(1);
+                + ((ref_span_end.saturating_sub(established)) * slot) / total_refs.max(1);
             refs.push((at.max(established), r));
             slot += 1;
         }

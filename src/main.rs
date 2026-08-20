@@ -16,7 +16,10 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use dcr::bench::{run_ablation, run_benchmark, run_mutation_probe, run_scaling, run_sweep};
+use dcr::bench::{
+    run_ablation, run_benchmark, run_coverage, run_mutation_probe, run_poison, run_scaling,
+    run_sweep,
+};
 use dcr::demo::run_demo;
 use dcr::graph::DcrError;
 use dcr::runtime::Dcr;
@@ -40,6 +43,8 @@ commands:
         --ablate              which mechanism carries which probe?
         --mutate              is a correction served once the original has dependents?
         --sweep               correctness and cost against B_attention
+        --coverage            read coverage as history grows (offline dual)
+        --poison              positive control: can stale_fact_read_rate fire?
 
 options:
   --store PATH                persisted memory (default: .dcr.json)
@@ -231,6 +236,10 @@ fn run() -> Result<(), String> {
             } else if has("--sweep") {
                 run_sweep(args.turns, &[120, 200, 300, 500, 800, 1200, 2000, 4000])
                     .map_err(to_err)?;
+            } else if has("--coverage") {
+                run_coverage(&[100, 300, 1000, 3000], args.budget).map_err(to_err)?;
+            } else if has("--poison") {
+                run_poison(args.budget).map_err(to_err)?;
             } else {
                 run_benchmark(args.turns, args.budget, args.window).map_err(to_err)?;
             }

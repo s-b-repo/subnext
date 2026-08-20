@@ -281,6 +281,11 @@ pub struct RelevancePlanner {
     /// exactly the cheap-but-useless material a utility-per-token optimiser is
     /// happy to pack the window with.
     pub seed_min_ratio: f32,
+    /// Negative control only. When true, stale nodes are planned as if fresh
+    /// instead of being skipped — used to prove `stale_fact_read_rate` can
+    /// return nonzero, so that a zero in production is a fired guard rather
+    /// than a guard that was never exercised. Never enable in real use.
+    pub admit_stale: bool,
 }
 
 impl Default for RelevancePlanner {
@@ -293,6 +298,7 @@ impl Default for RelevancePlanner {
             max_fanout: 6,
             max_candidates: 120,
             seed_min_ratio: 0.3,
+            admit_stale: false,
         }
     }
 }
@@ -331,7 +337,7 @@ impl RelevancePlanner {
             if node.status == Status::Superseded {
                 continue;
             }
-            if node.status == Status::Stale && !pinned.contains(&idx) {
+            if node.status == Status::Stale && !pinned.contains(&idx) && !self.admit_stale {
                 active.stale_seen.push(idx);
                 continue;
             }
@@ -433,9 +439,10 @@ impl RelevancePlanner {
             let node = ctx.graph.node(idx);
             match node.status {
                 Status::Superseded => continue,
-                // Never seed from a stale node without re-grounding it first.
-                Status::Stale => active.stale_seen.push(idx),
-                Status::Fresh => seeds.push((idx, score)),
+                // Never seed from a stale node without re-grounding it first —
+                // unless the negative control has bypassed the guard.
+                Status::Stale if !self.admit_stale => active.stale_seen.push(idx),
+                Status::Stale | Status::Fresh => seeds.push((idx, score)),
             }
         }
         // Fall back to the raw lexical index when state search finds nothing —

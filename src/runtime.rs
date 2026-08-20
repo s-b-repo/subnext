@@ -61,6 +61,15 @@ pub struct Dcr {
     /// How many times a turn may be re-planned at a richer level after the
     /// model reports insufficiency. Zero disables the escalation protocol.
     pub max_escalations: u32,
+    /// Every source span that has appeared in an assembled context, ever.
+    ///
+    /// The dual of `audit_path_completeness`: that metric is a property of
+    /// answers, and so is conditioned on the probe set knowing what to ask.
+    /// This is a property of the assembly history alone — conditioned on
+    /// nothing — so the spans it never contains are exactly the region a
+    /// query-layer degradation check cannot see. Credit: this metric was
+    /// proposed by the commenter "vespermind" against the DCR report.
+    assembled_spans: std::collections::HashSet<String>,
     reasoner: Box<dyn Reasoner>,
 }
 
@@ -92,6 +101,7 @@ impl Dcr {
             telemetry: Telemetry::default(),
             budget,
             max_escalations: 2,
+            assembled_spans: std::collections::HashSet::new(),
             reasoner: Box::new(LocalReasoner::new()),
         }
     }
@@ -289,6 +299,7 @@ impl Dcr {
             overflow: context.overflow,
         });
         self.speculator.feedback(&cited_idx);
+        self.mark_assembled(&context);
 
         Answer {
             tokens: context.tokens,
@@ -297,6 +308,54 @@ impl Dcr {
             escalations,
             cited,
             replanned,
+        }
+    }
+
+    /// Record the source spans of every node the model was shown this turn.
+    ///
+    /// A span counts as read if any node grounded in it was admitted, at any
+    /// ladder level — an L2 fact conveys the span's content just as an L0 quote
+    /// does. Spans that never appear here were ingested, indexed, and never
+    /// looked at; that is where a confident wrong answer comes from.
+    fn mark_assembled(&mut self, context: &ActiveContext) {
+        for entry in &context.entries {
+            // Only L0 renders a span's actual bytes. L1 summarises, and L2/L3
+            // convey a value derived from the spans — and because corroboration
+            // collapses many agreeing spans behind one node, any level above L0
+            // would mark spans whose specific content was never shown (a single
+            // L1 fact can sit on hundreds of spans). A silent wrong answer hides
+            // in exactly such an unshown span, so coverage counts L0 alone. A
+            // node cheap enough to admit at L0 has few spans, so this does not
+            // undercount by symmetry.
+            if entry.level != Level::L0 {
+                continue;
+            }
+            for span in &self.graph.node(entry.node).source_spans {
+                self.assembled_spans.insert(span.clone());
+            }
+        }
+    }
+
+    /// Read coverage: the fraction of L0 spans that have ever been assembled.
+    ///
+    /// Runs offline, replays no queries, and is conditioned on nothing. The
+    /// question worth watching is whether the covered count grows with history
+    /// or stays flat while `N` grows — see `bench --coverage`.
+    pub fn coverage(&self) -> Coverage {
+        let total = self.raw.len();
+        let assembled = self
+            .assembled_spans
+            .iter()
+            .filter(|id| self.raw.has_span(id))
+            .count();
+        Coverage {
+            total_spans: total,
+            assembled_spans: assembled,
+            fraction: if total == 0 {
+                0.0
+            } else {
+                assembled as f64 / total as f64
+            },
         }
     }
 
@@ -718,6 +777,27 @@ impl Dcr {
             runtime.reindex(idx);
         }
         Ok(runtime)
+    }
+}
+
+/// Read coverage — the offline, unconditioned dual of audit-path completeness.
+#[derive(Debug, Clone, Copy)]
+pub struct Coverage {
+    pub total_spans: usize,
+    pub assembled_spans: usize,
+    pub fraction: f64,
+}
+
+impl std::fmt::Display for Coverage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}/{} spans ever assembled ({:.1}% read coverage); {} spans never seen",
+            self.assembled_spans,
+            self.total_spans,
+            self.fraction * 100.0,
+            self.total_spans - self.assembled_spans
+        )
     }
 }
 

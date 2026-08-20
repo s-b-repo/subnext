@@ -7,7 +7,7 @@
 //! stale nodes and when it never marked any. These tests pin the ground-truth
 //! measurement that distinguishes those two cases.
 
-use dcr::bench::{build_mutation_corpus, MUTATIONS};
+use dcr::bench::{MUTATIONS, build_mutation_corpus};
 use dcr::llm::LocalReasoner;
 use dcr::runtime::Dcr;
 
