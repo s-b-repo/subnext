@@ -2095,3 +2095,181 @@ pub fn run_consolidation(turns: usize, budget: usize) -> Result<(), DcrError> {
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// A lexically diverse corpus
+// ---------------------------------------------------------------------------
+
+/// Vocabulary for [`build_corpus_diverse`]. Combined multiplicatively, these
+/// yield far more distinct sentences than the corpus has documents, so the
+/// distractor set stops being eight templates wearing different integers.
+const SUBJECTS: &[&str] = &[
+    "the ingest worker", "the replica set", "the edge cache", "the billing job",
+    "the search shard", "the webhook relay", "the auth broker", "the export queue",
+    "the metrics rollup", "the image resizer", "the audit sink", "the rate limiter",
+    "the session store", "the config poller", "the schema registry", "the batch loader",
+];
+const VERBS: &[&str] = &[
+    "was restarted after", "drained cleanly during", "reported elevated latency in",
+    "held steady through", "backed off from", "was rescheduled around",
+    "logged a warning about", "recovered without help from", "was drained ahead of",
+    "paged nobody during", "absorbed the spike in", "fell behind on",
+];
+const OBJECTS: &[&str] = &[
+    "the overnight compaction", "a partial network partition", "the weekly index rebuild",
+    "an upstream certificate rotation", "the regional failover drill", "a noisy neighbour",
+    "the quarterly retention sweep", "an operator typo", "the canary rollout",
+    "a stuck leader election", "the cold-start stampede", "a leaked file handle",
+];
+const CLOSERS: &[&str] = &[
+    "No action was taken.", "The runbook was not consulted.", "It resolved on its own.",
+    "A ticket was filed and closed.", "The on-call slept through it.",
+    "Nobody noticed until the digest.", "The graph looked fine afterwards.",
+    "It has not recurred since.",
+];
+
+/// The same probes and corrections as [`build_corpus`], with distractors drawn
+/// from a combinatorial vocabulary instead of eight repeated templates.
+///
+/// The standard corpus scales in *length* but not in *variety*: at 45,000 turns
+/// its noise is still eight sentences with an integer substituted, which is why
+/// pair coverage reads 0.0% and why "four million tokens of history" overstates
+/// what is being asked of retrieval. This generator makes each distractor
+/// lexically distinct, so a large run tests search against genuinely varied
+/// content rather than against a handful of memorised shapes.
+///
+/// Kept alongside the original rather than replacing it: every published figure
+/// comes from `build_corpus`, and silently changing the corpus under those
+/// tables would invalidate them.
+pub fn build_corpus_diverse(turns: usize) -> Corpus {
+    let base = build_corpus(turns);
+    // Which documents carry signal: the fixed opening facts, and the three
+    // corrections wherever the generator placed them. Detecting noise by prefix
+    // does not work — the templates hold an unsubstituted `{n}`, so comparing a
+    // rendered document against the raw template never matches and every
+    // distractor survives untouched. That is what left the first version at
+    // 2,324 distinct documents after the radix fix.
+    let keep: std::collections::HashSet<String> = base
+        .docs
+        .iter()
+        .enumerate()
+        .filter(|(i, (_, text))| {
+            *i < 10 || text.starts_with("Correction:") || text.starts_with("Update:")
+        })
+        .map(|(_, (id, _))| id.clone())
+        .collect();
+
+    let mut docs: Vec<(String, String)> = Vec::with_capacity(base.docs.len());
+    for (i, (id, text)) in base.docs.iter().enumerate() {
+        if keep.contains(id) {
+            docs.push((id.clone(), text.clone()));
+            continue;
+        }
+        // Mixed-radix decomposition of the index, so every combination is
+        // reachable and the sequence repeats only after their product.
+        //
+        // A first version used strides — `i * 7 % 16`, `i * 5 % 12` and so on —
+        // with a comment claiming they would not repeat until the product was
+        // exhausted. That is false: independent strides repeat at the *lowest
+        // common multiple* of their periods, which here is 48. It produced 26
+        // distinct documents out of 30,000 and would have shipped as a
+        // "diverse" corpus, because the claim was in a comment rather than in a
+        // test. `corpus_diversity_is_measured_not_asserted` now measures it.
+        let mut n = i;
+        let s = SUBJECTS[n % SUBJECTS.len()];
+        n /= SUBJECTS.len();
+        let v = VERBS[n % VERBS.len()];
+        n /= VERBS.len();
+        let o = OBJECTS[n % OBJECTS.len()];
+        n /= OBJECTS.len();
+        let c = CLOSERS[n % CLOSERS.len()];
+        docs.push((
+            id.clone(),
+            format!(
+                "Shift note {i}: {s} {v} {o}. {c} Window {i} closed with no follow-up, \
+                 and the {s} owner acknowledged at slot {i}.",
+            ),
+        ));
+    }
+    Corpus {
+        docs,
+        probes: base.probes,
+    }
+}
+
+/// Scaling on the lexically diverse corpus, out to millions of tokens.
+///
+/// The standard generator emits 21 distinct documents at any size, so its large
+/// runs grow in length at constant variety and say more about the generator than
+/// about the system — including its cost, which is dominated by comparing each
+/// new document against thousands of near-duplicates. This runs the same probes
+/// against [`build_corpus_diverse`], and reports the distinct-document count in
+/// the table so the difference is visible rather than asserted.
+pub fn run_scaling_diverse(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
+    println!(
+        "{:>8} {:>11} {:>10} {:>8} {:>9} {:>7} {:>9} {:>8}",
+        "turns", "history", "distinct", "nodes", "mean k", "correct", "ingest", "query"
+    );
+    println!("{}", "-".repeat(76));
+    let mut first: Option<(usize, f64)> = None;
+    let mut last = (0usize, 0.0f64);
+    for &turns in sizes {
+        let corpus = build_corpus_diverse(turns);
+        let started = Instant::now();
+        let mut runtime = Dcr::new(budget);
+        runtime.index.set_exact(false);
+        for (doc_id, text) in &corpus.docs {
+            runtime.ingest(text, Some(doc_id))?;
+        }
+        let ingest_s = started.elapsed().as_secs_f64();
+        let mut reasoner = LocalReasoner::new();
+        let started = Instant::now();
+        let mut correct = 0usize;
+        for probe in &corpus.probes {
+            let a = runtime.ask_with(probe.query, None, &mut reasoner);
+            let scored = if probe.on_context {
+                a.context.render()
+            } else {
+                a.text.clone()
+            };
+            if probe.scores(&scored) {
+                correct += 1;
+            }
+        }
+        let query_ms = started.elapsed().as_secs_f64() * 1000.0 / corpus.probes.len() as f64;
+        let distinct: HashSet<String> = corpus
+            .docs
+            .iter()
+            .map(|(_, t)| t.chars().filter(|c| !c.is_ascii_digit()).collect())
+            .collect();
+        let history = estimate_tokens(&corpus.text());
+        let report = runtime.telemetry.report();
+        println!(
+            "{turns:>8} {history:>11} {:>10} {:>8} {:>9.1} {:>7} {:>8.0}s {:>6.0}ms",
+            distinct.len(),
+            runtime.graph.len(),
+            report.tokens_per_query_mean,
+            format!("{correct}/{}", corpus.probes.len()),
+            ingest_s,
+            query_ms
+        );
+        if first.is_none() {
+            first = Some((history, report.tokens_per_query_mean));
+        }
+        last = (history, report.tokens_per_query_mean);
+    }
+    println!("{}", "-".repeat(76));
+    if let Some((h0, k0)) = first {
+        println!(
+            "history grew {:.0}x; active context grew {:.2}x",
+            last.0 as f64 / h0.max(1) as f64,
+            last.1 / k0.max(1.0)
+        );
+    }
+    println!(
+        "The generator exhausts its vocabulary at 18,432 combinations, so past roughly 18,000\n\
+         turns the distinct count plateaus and documents begin to repeat. Diversity is far\n\
+         higher than the standard corpus at every size and is not unbounded."
+    );
+    Ok(())
+}

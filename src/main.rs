@@ -18,6 +18,7 @@ use std::process::ExitCode;
 
 use dcr::bench::{
     run_ablation, run_baselines, run_benchmark, run_consolidation, run_coverage, run_decay, run_multi_hop, run_mutation_probe,
+    run_scaling_diverse,
     run_poison,
     run_rebuild, run_scaling, run_sweep, run_tamper,
 };
@@ -52,6 +53,7 @@ commands:
         --multihop            does graph expansion buy anything when a join is needed?
         --decay               does a recency prefilter buy latency without costing recall?
         --consolidate         correctness when the store is written mid-turn
+        --diverse             scaling on a lexically varied corpus, to millions of tokens
         --sweep               correctness and cost against B_attention
         --coverage            read coverage as history grows (offline dual)
         --poison              positive control: can stale_fact_read_rate fire?
@@ -377,6 +379,8 @@ fn run() -> Result<(), String> {
             let has = |name: &str| args.flags.iter().any(|f| f == name);
             if has("--scaling") {
                 run_scaling(&[100, 300, 1000, 3000], args.budget).map_err(to_err)?;
+            } else if has("--diverse") {
+                run_scaling_diverse(&[3_000, 10_000, 30_000, 80_000], args.budget).map_err(to_err)?;
             } else if has("--consolidate") {
                 run_consolidation(args.turns, args.budget).map_err(to_err)?;
             } else if has("--decay") {
