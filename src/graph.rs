@@ -268,6 +268,10 @@ impl MemoryGraph {
         self.nodes[new].meta.contradicts.retain(|c| *c != old_id);
         let new_id = self.nodes[new].id.clone();
         self.nodes[old].meta.contradicts.retain(|c| *c != new_id);
+        // …and stops *reading* as contested, once nothing live disagrees with
+        // it. Leaving the survivor marked would make every correction look
+        // like an open dispute forever.
+        self.settle(new);
         self.invalidate(old, false);
         self.mark_orphaned_evidence(old);
         self.bump();
@@ -315,6 +319,28 @@ impl MemoryGraph {
             if !marks.contains(&other) {
                 marks.push(other);
             }
+            // A node in a live disagreement is not `fresh`, and saying so in
+            // the status is what lets the state itself report the dispute
+            // rather than leaving it to be inferred from the edges.
+            if self.nodes[src].status == Status::Fresh {
+                self.nodes[src].status = Status::Contradicted;
+            }
+        }
+    }
+
+    /// Return a node to `fresh` once nothing live contradicts it any more.
+    fn settle(&mut self, idx: NodeIdx) {
+        if self.nodes[idx].status != Status::Contradicted {
+            return;
+        }
+        let live = self.nodes[idx]
+            .meta
+            .contradicts
+            .iter()
+            .filter_map(|id| self.by_id.get(id))
+            .any(|&other| self.nodes[other].status.is_live());
+        if !live {
+            self.nodes[idx].status = Status::Fresh;
         }
     }
 

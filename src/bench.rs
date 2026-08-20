@@ -15,6 +15,8 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
+use crate::baselines::{Rag, Recursive, SummarizeAll};
+use crate::context_store::ContextStore;
 use crate::graph::DcrError;
 use crate::llm::{LocalReasoner, Reasoner};
 use crate::runtime::Dcr;
@@ -25,6 +27,69 @@ pub struct Probe {
     pub query: &'static str,
     pub expected: &'static str,
     pub label: &'static str,
+    /// When true the probe passes if `expected` is **absent** from the answer.
+    ///
+    /// A recall probe asks "can you find it". A refusal probe asks "can you
+    /// decline to serve something you should not" — a stale derived figure, or
+    /// a fact nobody ever stated. A benchmark made only of recall probes
+    /// rewards confidently answering everything, which is the failure mode the
+    /// whole design is aimed at.
+    pub absent: bool,
+    /// Score the assembled **context** rather than the answer.
+    ///
+    /// For probes that need a join the harness's reasoner cannot perform — it
+    /// is a line-matcher, so it cannot chain A→B→C — scoring the answer
+    /// measures the stand-in model, not the assembly. Scoring the window keeps
+    /// the comparison on what this benchmark is actually about. Applied
+    /// uniformly: full context trivially passes, because it genuinely does
+    /// contain the material.
+    pub on_context: bool,
+}
+
+impl Probe {
+    /// Passes when the answer contains `expected`.
+    pub const fn recall(query: &'static str, expected: &'static str, label: &'static str) -> Probe {
+        Probe {
+            query,
+            expected,
+            label,
+            absent: false,
+            on_context: false,
+        }
+    }
+
+    /// Passes when the assembled context contains `expected`, whatever the
+    /// reasoner then made of it.
+    pub const fn assembled(
+        query: &'static str,
+        expected: &'static str,
+        label: &'static str,
+    ) -> Probe {
+        Probe {
+            query,
+            expected,
+            label,
+            absent: false,
+            on_context: true,
+        }
+    }
+
+    /// Passes when the answer does **not** contain `expected`.
+    pub const fn refuse(query: &'static str, expected: &'static str, label: &'static str) -> Probe {
+        Probe {
+            query,
+            expected,
+            label,
+            absent: true,
+            on_context: false,
+        }
+    }
+
+    /// Did this answer pass?
+    pub fn scores(&self, answer: &str) -> bool {
+        let found = answer.to_lowercase().contains(&self.expected.to_lowercase());
+        found != self.absent
+    }
 }
 
 pub struct Corpus {
@@ -151,41 +216,41 @@ pub fn build_corpus(turns: usize) -> Corpus {
     }
 
     let probes = vec![
-        Probe {
-            query: "what is the server ip?",
-            expected: "10.0.9.7",
-            label: "corrected fact (mid-history)",
-        },
-        Probe {
-            query: "what is the deploy window?",
-            expected: "02:00-04:00",
-            label: "corrected fact (late)",
-        },
-        Probe {
-            query: "who is the owner of the checkout service?",
-            expected: "team-payments",
-            label: "old fact, never repeated",
-        },
-        Probe {
-            query: "quote the exact error message",
-            expected: "connection refused",
-            label: "exact quote",
-        },
-        Probe {
-            query: "why did we roll back?",
-            expected: "firewall rule 37",
-            label: "justification / multi-hop",
-        },
-        Probe {
-            query: "how many retry attempts were made before the failure?",
-            expected: "7 attempts",
-            label: "detail buried in a long span",
-        },
-        Probe {
-            query: "what is the hourly rate?",
-            expected: "210",
-            label: "corrected fact (very late)",
-        },
+        Probe::recall(
+            "what is the server ip?",
+            "10.0.9.7",
+            "corrected fact (mid-history)",
+        ),
+        Probe::recall(
+            "what is the deploy window?",
+            "02:00-04:00",
+            "corrected fact (late)",
+        ),
+        Probe::recall(
+            "who is the owner of the checkout service?",
+            "team-payments",
+            "old fact, never repeated",
+        ),
+        Probe::recall(
+            "quote the exact error message",
+            "connection refused",
+            "exact quote",
+        ),
+        Probe::recall(
+            "why did we roll back?",
+            "firewall rule 37",
+            "justification / multi-hop",
+        ),
+        Probe::recall(
+            "how many retry attempts were made before the failure?",
+            "7 attempts",
+            "detail buried in a long span",
+        ),
+        Probe::recall(
+            "what is the hourly rate?",
+            "210",
+            "corrected fact (very late)",
+        ),
     ];
     Corpus { docs, probes }
 }
@@ -273,6 +338,7 @@ pub fn run_benchmark(turns: usize, budget: usize, window: usize) -> Result<(), D
     let mut baseline = BaselineReasoner;
     let mut reasoner = LocalReasoner::new();
     let mut rows: Vec<Row> = Vec::new();
+    let mut ungrounded: Vec<&str> = Vec::new();
 
     for probe in &corpus.probes {
         let full = baseline.complete(&format!("{full_text}\n\nQUESTION: {}", probe.query), "");
@@ -283,13 +349,31 @@ pub fn run_benchmark(turns: usize, budget: usize, window: usize) -> Result<(), D
         for node_id in &answer.cited {
             let _ = runtime.explain(node_id);
         }
+        // Substring containment is not enough on its own. A reviewer measured
+        // 34 of 41 fallback turns in their own corpus scoring "correct" with no
+        // grounding at all, because the scorer checked completion rather than
+        // grounding — and containment has the identical hole: a fluent answer
+        // assembled from the wrong context passes it exactly as cleanly as a
+        // right one. DCR already records whether each cited node walks back to
+        // raw spans and had never been allowed to fail a probe. Now it can.
+        // On an honest run this changes nothing, which is the point.
+        let grounded = !answer.cited.is_empty()
+            && answer.cited.iter().all(|id| {
+                runtime
+                    .graph
+                    .idx_of(id)
+                    .is_some_and(|idx| runtime.graph.explain(idx, None).complete)
+            });
         let hit = |text: &str| text.to_lowercase().contains(&probe.expected.to_lowercase());
+        if hit(&answer.text) && !grounded {
+            ungrounded.push(probe.label);
+        }
         rows.push(Row {
             label: probe.label,
             query: probe.query,
             correct_full: hit(&full),
             correct_window: hit(&win),
-            correct_dcr: hit(&answer.text),
+            correct_dcr: hit(&answer.text) && grounded,
             dcr_tokens: answer.tokens,
             dcr_answer: answer.text,
         });
@@ -372,6 +456,21 @@ pub fn run_benchmark(turns: usize, budget: usize, window: usize) -> Result<(), D
         stats.stale
     );
     println!("  note: storage stays O(N); the claim is bounded *attention*, not bounded storage.");
+    println!("{line}");
+    if ungrounded.is_empty() {
+        println!(
+            "grounding gate: 0 of {} answers matched the expected value without a complete\n\
+             audit path to raw spans. Correctness above is grounded correctness, not containment.",
+            corpus.probes.len()
+        );
+    } else {
+        println!(
+            "grounding gate: {} answer(s) matched the expected value but could not be walked back\n\
+             to raw spans, and are scored as failures: {}",
+            ungrounded.len(),
+            ungrounded.join("; ")
+        );
+    }
     println!("{line}");
     println!("how to read this");
     println!("  * The reasoner is a deterministic line-matcher for all three systems, so this");
@@ -630,10 +729,10 @@ pub fn run_poison(budget: usize) -> Result<(), DcrError> {
 /// set at each size.
 pub fn run_coverage(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
     println!(
-        "{:>7} {:>9} {:>9} {:>10} {:>12}",
-        "turns", "spans N", "assembled", "coverage", "never seen"
+        "{:>7} {:>9} {:>9} {:>10} {:>12} {:>10} {:>9}",
+        "turns", "spans N", "assembled", "coverage", "never seen", "dep pairs", "co-seen"
     );
-    println!("{}", "-".repeat(52));
+    println!("{}", "-".repeat(74));
     let mut first: Option<(usize, usize)> = None;
     let mut last = (0usize, 0usize, 0usize);
     for &turns in sizes {
@@ -647,12 +746,15 @@ pub fn run_coverage(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
             rt.ask_with(probe.query, None, &mut reasoner);
         }
         let cov = rt.coverage();
+        let pc = rt.pair_coverage();
         println!(
-            "{turns:>7} {:>9} {:>9} {:>9.1}% {:>12}",
+            "{turns:>7} {:>9} {:>9} {:>9.1}% {:>12} {:>10} {:>8.1}%",
             cov.total_spans,
             cov.assembled_spans,
             cov.fraction * 100.0,
-            cov.total_spans - cov.assembled_spans
+            cov.total_spans - cov.assembled_spans,
+            pc.linked_pairs,
+            pc.fraction * 100.0
         );
         if first.is_none() {
             first = Some((cov.total_spans, cov.assembled_spans));
@@ -663,12 +765,19 @@ pub fn run_coverage(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
             cov.total_spans - cov.assembled_spans,
         );
     }
-    println!("{}", "-".repeat(52));
+    println!("{}", "-".repeat(74));
     if let Some((n0, a0)) = first {
         let n_growth = last.0 as f64 / n0.max(1) as f64;
         let a_growth = last.1 as f64 / a0.max(1) as f64;
         println!("history (N) grew {n_growth:.0}x; spans ever shown at L0 grew {a_growth:.1}x.",);
         println!("Coverage counts L0 only: the sole level that renders a span's actual bytes.");
+        println!(
+            "'dep pairs' are span pairs joined by a dependency edge — where co-occurrence is\n\
+             load-bearing — and 'co-seen' is the fraction ever rendered in the *same* window.\n\
+             It collapses faster than single-span coverage and its denominator grows faster than\n\
+             N, so the one-dimensional number is the optimistic view: a span can be covered while\n\
+             every pairing that made it matter never once co-occurred."
+        );
         println!("A fixed probe set surfaces a roughly constant handful of spans, so the count");
         println!(
             "stays flat while the unread region ({} spans here) grows with the history and",
@@ -763,9 +872,9 @@ pub struct Mutation {
     pub stale: &'static str,
     /// Ground truth: the value that must be served instead.
     pub live: &'static str,
-    establish: &'static str,
-    references: &'static [&'static str],
-    correction: &'static str,
+    pub establish: &'static str,
+    pub references: &'static [&'static str],
+    pub correction: &'static str,
 }
 
 pub const MUTATIONS: &[Mutation] = &[
@@ -823,11 +932,84 @@ pub const MUTATIONS: &[Mutation] = &[
     },
 ];
 
+/// The adversarial set: same four facts, worded so the *superseded* value is
+/// the more attractive retrieval target.
+///
+/// Proposed by a reviewer who pointed out that [`MUTATIONS`] does not
+/// distinguish two hypotheses. There the correction is phrased much like the
+/// original, so both score alike on overlap with the query and a clean result is
+/// equally consistent with "the planner respected the supersession edge" and
+/// "the planner picked up the newer text because nothing pulled the other way".
+///
+/// Here the stale line repeats the query's own terms and the correction states
+/// the key once and paraphrases the rest, so lexical attraction points at the
+/// wrong answer. The subject key still matches — supersession has to be able to
+/// fire — but nothing else helps. A pass means the edge won something.
+pub const ADVERSARIAL: &[Mutation] = &[
+    Mutation {
+        label: "datastore (stale is lexically closer)",
+        query: "what is the primary datastore host serving checkout reads?",
+        stale: "postgres-11",
+        live: "postgres-15",
+        establish: "The primary datastore is postgres-11 on host db-alpha, serving all checkout reads.",
+        references: &[
+            "Backups target the primary datastore on host db-alpha serving checkout reads nightly.",
+            "The primary datastore host db-alpha serves checkout reads at 61 percent disk.",
+            "Replica lag against the primary datastore host serving checkout reads is under 200ms.",
+            "Schema migration 0042 ran on the primary datastore host serving checkout reads.",
+        ],
+        correction: "Correction: the primary datastore is postgres-15.",
+    },
+    Mutation {
+        label: "threshold (stale is lexically closer)",
+        query: "what is the autoscaler threshold for sustained cpu scale-out?",
+        stale: "65 percent",
+        live: "80 percent",
+        establish: "The autoscaler threshold is 65 percent for sustained cpu scale-out events.",
+        references: &[
+            "Sustained cpu crossing the autoscaler threshold triggers a scale-out event.",
+            "Load test 19 held sustained cpu just under the autoscaler threshold scale-out point.",
+            "Cost review flagged the autoscaler threshold for sustained cpu scale-out as expensive.",
+        ],
+        correction: "Update: the autoscaler threshold is 80 percent.",
+    },
+    Mutation {
+        label: "region (stale is lexically closer)",
+        query: "what is the failover region in the disaster recovery runbook?",
+        stale: "eu-west-2",
+        live: "eu-central-1",
+        establish: "The failover region is eu-west-2 in the disaster recovery runbook.",
+        references: &[
+            "The disaster recovery runbook fails over to the failover region with a 12 minute RTO.",
+            "Cross-region replication to the failover region in the disaster recovery runbook resumed.",
+            "The last drill exercised the failover region named in the disaster recovery runbook.",
+        ],
+        correction: "Correction: the failover region is eu-central-1.",
+    },
+    Mutation {
+        label: "extension (stale is lexically closer)",
+        query: "what is the escalation extension for the platform oncall rota bridge?",
+        stale: "4412",
+        live: "4419",
+        establish: "The escalation extension is 4412 for the platform oncall rota bridge.",
+        references: &[
+            "Paging routes to the escalation extension for the platform oncall rota bridge.",
+            "The incident bridge dials the escalation extension of the platform oncall rota.",
+        ],
+        correction: "Update: the escalation extension is 4419.",
+    },
+];
+
 /// Interleave the mutation cases into a long transcript: each fact is
 /// established early, referenced across the first 60%, and corrected at 85%.
 pub fn build_mutation_corpus(turns: usize) -> Corpus {
+    build_mutation_corpus_from(turns, MUTATIONS)
+}
+
+/// As [`build_mutation_corpus`], for any mutation set.
+pub fn build_mutation_corpus_from(turns: usize, set: &'static [Mutation]) -> Corpus {
     let mut docs: Vec<(String, String)> = Vec::new();
-    for (m_idx, m) in MUTATIONS.iter().enumerate() {
+    for (m_idx, m) in set.iter().enumerate() {
         docs.push((format!("m{m_idx:02}e"), m.establish.to_string()));
     }
 
@@ -837,9 +1019,9 @@ pub fn build_mutation_corpus(turns: usize) -> Corpus {
     // accumulating dependents well after they were planted.
     let ref_span_end = (turns as f64 * 0.60) as usize;
     let mut refs: Vec<(usize, &str)> = Vec::new();
-    let total_refs: usize = MUTATIONS.iter().map(|m| m.references.len()).sum();
+    let total_refs: usize = set.iter().map(|m| m.references.len()).sum();
     let mut slot = 0usize;
-    for m in MUTATIONS {
+    for m in set {
         for r in m.references {
             let at = established
                 + ((ref_span_end.saturating_sub(established)) * slot) / total_refs.max(1);
@@ -851,7 +1033,7 @@ pub fn build_mutation_corpus(turns: usize) -> Corpus {
     for i in established..turns.max(established + 1) {
         let id = format!("t{i:03}");
         // corrections land in consecutive slots starting at 85%
-        let corr = MUTATIONS
+        let corr = set
             .iter()
             .enumerate()
             .find(|(k, _)| correct_at + k == i)
@@ -891,6 +1073,22 @@ pub fn build_mutation_corpus(turns: usize) -> Corpus {
 /// superseded fires in every configuration, so the `no supersession` row below
 /// is a live negative control rather than a decorative one.
 pub fn run_mutation_probe(turns: usize, budget: usize) -> Result<(), DcrError> {
+    run_mutation_set(turns, budget, MUTATIONS, "MUTATION AND CORRECTION")?;
+    println!();
+    run_mutation_set(
+        turns,
+        budget,
+        ADVERSARIAL,
+        "ADVERSARIAL - the superseded value is the lexically closer match",
+    )
+}
+
+fn run_mutation_set(
+    turns: usize,
+    budget: usize,
+    set: &'static [Mutation],
+    heading: &str,
+) -> Result<(), DcrError> {
     struct Variant {
         name: &'static str,
         apply: fn(&mut Dcr),
@@ -914,15 +1112,15 @@ pub fn run_mutation_probe(turns: usize, budget: usize) -> Result<(), DcrError> {
         },
     ];
 
-    let corpus = build_mutation_corpus(turns);
-    let n = MUTATIONS.len();
+    let corpus = build_mutation_corpus_from(turns, set);
+    let n = set.len();
     println!(
-        "MUTATION AND CORRECTION - {turns} turns, {} tokens of history, B_attention = {budget}",
+        "{heading} - {turns} turns, {} tokens of history, B_attention = {budget}",
         estimate_tokens(&corpus.text())
     );
     println!(
         "{n} facts established early, referenced {} times in total, superseded at 85% of history",
-        MUTATIONS.iter().map(|m| m.references.len()).sum::<usize>()
+        set.iter().map(|m| m.references.len()).sum::<usize>()
     );
     let header = format!(
         "{:<24} {:>10} {:>13} {:>11} {:>9}   {}",
@@ -946,7 +1144,7 @@ pub fn run_mutation_probe(turns: usize, budget: usize) -> Result<(), DcrError> {
         let mut missed: Vec<&str> = Vec::new();
         let mut no_edge: Vec<&str> = Vec::new();
 
-        for m in MUTATIONS {
+        for m in set {
             let answer = runtime.ask_with(m.query, None, &mut reasoner);
             let text = answer.text.to_lowercase();
             let live_v = m.live.to_lowercase();
@@ -1044,4 +1242,467 @@ pub fn run_mutation_probe(turns: usize, budget: usize) -> Result<(), DcrError> {
         );
     }
     Ok(())
+}
+
+// -- the wider baseline set ------------------------------------------------
+
+/// DCR against the retrieval baselines, not only the truncation ones.
+///
+/// The existing table compares against full context and a sliding window: both
+/// lose material by *position*, which is the failure DCR was built for, so
+/// winning there proves less than it looks. This adds three assemblies that
+/// also retrieve — plain RAG, uniform summarisation, and the recursive
+/// map-reduce shape — at the same budget and under the same reasoner.
+///
+/// The table is capable of showing DCR losing. If a flat top-k retriever
+/// answers these probes at this budget, the graph and the ladder are not
+/// paying for themselves, and that is what the numbers are for.
+pub fn run_baselines(turns: usize, budget: usize) -> Result<(), DcrError> {
+    println!("STANDARD CORPUS — the probes the headline table uses");
+    baseline_table(&build_corpus(turns), turns, budget)?;
+    println!();
+    println!("DISCRIMINATING CORPUS — similarity is misleading, and refusing is sometimes correct");
+    baseline_table(&build_adversarial_corpus(turns), turns, budget)?;
+    println!(
+        "  Two probes are passed by *declining*: a stale derivation whose inputs were\n  \
+         corrected, and a fact nobody ever stated. DCR fails both, and the reasons are\n  \
+         worth more than the score. The stale derivation is served because invalidation\n  \
+         only tracks derivations the runtime actually computed — a figure stated as text\n  \
+         is never recomputed. The absent fact is served because a window pre-filled with\n  \
+         selected facts makes near-miss material easy to reach for.\n  \
+         The contested probe fails for a *documented* reason: two disagreeing claims\n  \
+         where neither is phrased as a correction are resolved by ingest order, not\n  \
+         marked as a dispute (`may_supersede`). Last-writer-wins is the right default\n  \
+         for a chronological transcript — the cost is that two sources disagreeing are\n  \
+         silently settled by arrival time, and that cost is what this row prices."
+    );
+    Ok(())
+}
+
+fn baseline_table(corpus: &Corpus, turns: usize, budget: usize) -> Result<(), DcrError> {
+    let full_text = corpus.text();
+
+    let mut runtime = Dcr::new(budget);
+    for (doc_id, text) in &corpus.docs {
+        runtime.ingest(text, Some(doc_id))?;
+    }
+
+    let rag = Rag::new(&corpus.docs, budget);
+    let summarizer = SummarizeAll::new(&corpus.docs, budget);
+    let recursive = Recursive::new(&corpus.docs, 8);
+
+    let mut baseline = BaselineReasoner;
+    let mut reasoner = LocalReasoner::new();
+
+    struct Score {
+        correct: usize,
+        tokens: usize,
+    }
+    let mut scores: Vec<(&str, Score)> = ["full context", "RAG (top-k)", "summarize-all", "recursive", "DCR"]
+        .into_iter()
+        .map(|name| (name, Score { correct: 0, tokens: 0 }))
+        .collect();
+
+    let line = "-".repeat(88);
+    println!("{line}");
+    println!(
+        "{:<32}{:>10}{:>10}{:>14}{:>10}{:>10}",
+        "probe", "full", "RAG", "summarize", "recurse", "DCR"
+    );
+    println!("{line}");
+
+    for probe in &corpus.probes {
+        let full = baseline.complete(&format!("{full_text}\n\nQUESTION: {}", probe.query), "");
+        let (rag_ctx, rag_tokens) = rag.assemble(probe.query);
+        let rag_answer = baseline.complete(&format!("{rag_ctx}\n\nQUESTION: {}", probe.query), "");
+        let (sum_ctx, sum_tokens) = summarizer.assemble(probe.query);
+        let sum_answer = baseline.complete(&format!("{sum_ctx}\n\nQUESTION: {}", probe.query), "");
+        let (rec_answer, rec_tokens) = recursive.answer(probe.query, &mut baseline);
+        let dcr = runtime.ask_with(probe.query, None, &mut reasoner);
+
+        // `Probe::scores` handles both directions: a refusal probe passes when
+        // the value is absent, so a system that answers everything confidently
+        // is penalised rather than rewarded. A context-scored probe is judged
+        // on what each system assembled, uniformly — the harness's line-matcher
+        // cannot perform a join, and scoring its output would measure the
+        // stand-in reasoner instead of the assembly.
+        let dcr_context = dcr.context.render_with_header(false);
+        let judged = |answer: &str, context: &str| {
+            probe.scores(if probe.on_context { context } else { answer })
+        };
+        let outcomes = [
+            (
+                judged(&full, &full_text),
+                estimate_tokens(&full_text),
+            ),
+            (judged(&rag_answer, &rag_ctx), rag_tokens),
+            (judged(&sum_answer, &sum_ctx), sum_tokens),
+            // Recursion reads every chunk, so its "context" is the whole corpus.
+            (judged(&rec_answer, &full_text), rec_tokens),
+            (judged(&dcr.text, &dcr_context), dcr.tokens),
+        ];
+        for ((_, score), (correct, tokens)) in scores.iter_mut().zip(outcomes.iter()) {
+            score.correct += usize::from(*correct);
+            score.tokens += tokens;
+        }
+        let mark = |ok: bool| if ok { "ok" } else { "MISS" };
+        println!(
+            "{:<32}{:>10}{:>10}{:>14}{:>10}{:>10}",
+            probe.label,
+            mark(outcomes[0].0),
+            mark(outcomes[1].0),
+            mark(outcomes[2].0),
+            mark(outcomes[3].0),
+            mark(outcomes[4].0)
+        );
+    }
+
+    println!("{line}");
+    let probes = corpus.probes.len().max(1);
+    print!("{:<32}", "correct");
+    for (_, score) in &scores {
+        print!("{:>10}", format!("{}/{}", score.correct, probes));
+    }
+    println!();
+    print!("{:<32}", "mean tokens per query");
+    for (_, score) in &scores {
+        print!("{:>10}", format!("{:.0}", score.tokens as f64 / probes as f64));
+    }
+    println!();
+    println!("{line}");
+    println!(
+        "{} turns \u{b7} {} tokens of history \u{b7} B_attention = {budget}",
+        turns,
+        estimate_tokens(&full_text)
+    );
+    println!(
+        "  Same deterministic reasoner across every column, so this compares context\n  \
+         assemblies rather than models. RAG and summarize-all get the same budget DCR\n  \
+         does; recursive is charged for every chunk it reads, which is the cost its\n  \
+         unlimited coverage actually has."
+    );
+    Ok(())
+}
+
+/// Is "destroy and rebuild the workspace" cheap enough to be a real guarantee?
+///
+/// The specification claims the working set can be discarded and reconstructed
+/// from memory at any time. That is only a useful invariant if rebuilding is
+/// cheaper than never having discarded it, so this measures the rebuild rather
+/// than asserting it: cold assembly, then the same assembly with the ladder's
+/// caches warm.
+pub fn run_rebuild(turns: usize, budget: usize) -> Result<(), DcrError> {
+    let corpus = build_corpus(turns);
+    let mut runtime = Dcr::new(budget);
+    for (doc_id, text) in &corpus.docs {
+        runtime.ingest(text, Some(doc_id))?;
+    }
+
+    let line = "-".repeat(88);
+    println!("{line}");
+    println!(
+        "{:<34}{:>12}{:>12}{:>12}{:>14}",
+        "probe", "cold (ms)", "warm (ms)", "nodes", "L1/L2/L3"
+    );
+    println!("{line}");
+
+    let mut cold_total = 0f64;
+    let mut warm_total = 0f64;
+    for probe in &corpus.probes {
+        // Cold is the whole destroy-and-rebuild: caches dropped *and* the
+        // working set reassembled. Timing a plan after `rebuild_workspace`
+        // would time a warm one, since that call has already replanned.
+        let started = Instant::now();
+        let report = runtime.rebuild_workspace(probe.query, None);
+        let cold = started.elapsed().as_secs_f64() * 1000.0;
+
+        // Warm: the same query again, with every representation now cached.
+        let started = Instant::now();
+        let context = runtime.plan(probe.query, None);
+        let warm = started.elapsed().as_secs_f64() * 1000.0;
+
+        cold_total += cold;
+        warm_total += warm;
+        println!(
+            "{:<34}{:>12.2}{:>12.2}{:>12}{:>14}",
+            probe.label,
+            cold,
+            warm,
+            context.entries.len(),
+            format!(
+                "{}/{}/{}",
+                report.rebuilt_l1, report.rebuilt_l2, report.rebuilt_l3
+            )
+        );
+    }
+
+    println!("{line}");
+    let probes = corpus.probes.len().max(1) as f64;
+    println!(
+        "mean cold rebuild {:.2}ms \u{b7} mean warm assembly {:.2}ms \u{b7} {} nodes, {} spans",
+        cold_total / probes,
+        warm_total / probes,
+        runtime.graph.len(),
+        runtime.raw.len()
+    );
+    println!(
+        "  Cold is the real cost of the guarantee: every cached representation dropped,\n  \
+         then the working set reassembled from L0 alone. Warm is the same query with\n  \
+         the caches populated. The gap is what the level cache buys, and it scales with\n  \
+         how much L1 has to be rebuilt — the probes that admit only cached facts rebuild\n  \
+         nothing and cost the same either way, while the one that pulls long spans pays\n  \
+         the most. Rebuild is bounded by the working set, not by history: k nodes, not N."
+    );
+    Ok(())
+}
+
+/// The security claims, made falsifiable.
+///
+/// Each case corrupts a container in a specific way and asserts the runtime
+/// notices. A claim that cannot fail in a test is not a claim, and "tamper
+/// evident" is exactly the sort of property that reads as true until someone
+/// checks.
+pub fn run_tamper(budget: usize) -> Result<(), DcrError> {
+    let dir = std::env::temp_dir().join(format!("dcr-tamper-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let mut runtime = Dcr::new(budget);
+    runtime.ingest(
+        "The server ip is 10.0.4.12 and the port is 8080.\n\n\
+         Decision: roll back to build 4471 because the blocker is firewall rule 37.",
+        Some("t1"),
+    )?;
+    runtime.ingest("Correction: the server ip is 10.0.9.7.", Some("t2"))?;
+    runtime.save_context(&dir, None)?;
+
+    let line = "-".repeat(88);
+    println!("{line}");
+    println!("{:<44}{:>12}   {:<26}", "attack", "detected", "how");
+    println!("{line}");
+
+    let report = |attack: &str, detected: bool, how: &str| {
+        println!(
+            "{:<44}{:>12}   {:<26}",
+            attack,
+            if detected { "yes" } else { "NO" },
+            how
+        );
+        detected
+    };
+    let mut all = true;
+
+    // 1 — flip a bit in a stored object.
+    {
+        let store = ContextStore::open(&dir).map_err(|e| DcrError::Parse(e.to_string()))?;
+        let victim = store.object_ids().next().cloned().unwrap_or_default();
+        let path = store.object_path(&victim);
+        let original = std::fs::read(&path).map_err(|e| DcrError::Io(e.to_string()))?;
+        let mut bytes = original.clone();
+        let at = bytes.len() / 2;
+        bytes[at] ^= 0x01;
+        std::fs::write(&path, &bytes).map_err(|e| DcrError::Io(e.to_string()))?;
+
+        all &= report(
+            "flip one bit in an object",
+            store.verify(None).objects_failed.contains(&victim),
+            "content address",
+        );
+        all &= report(
+            "…and the runtime refuses to load it",
+            Dcr::open_context(&dir, budget).is_err(),
+            "gateway",
+        );
+        std::fs::write(&path, &original).map_err(|e| DcrError::Io(e.to_string()))?;
+    }
+
+    // 2 — rewrite history: edit an old checkpoint and leave the rest alone.
+    {
+        let path = dir.join("checkpoints").join("000001");
+        let original = std::fs::read_to_string(&path).map_err(|e| DcrError::Io(e.to_string()))?;
+        let forged = original.replace("\"object_count\":", "\"object_count\": 1, \"ignored\":");
+        std::fs::write(&path, &forged).map_err(|e| DcrError::Io(e.to_string()))?;
+        all &= report(
+            "rewrite a historical checkpoint",
+            ContextStore::open(&dir).is_err(),
+            "hash chain",
+        );
+        std::fs::write(&path, &original).map_err(|e| DcrError::Io(e.to_string()))?;
+    }
+
+    // 3 — roll back to an older, internally consistent state.
+    {
+        let mut runtime = Dcr::open_context(&dir, budget)?;
+        runtime.ingest("The retry budget is 5 attempts per minute.", Some("t3"))?;
+        let sealed = runtime.save_context(&dir, None)?;
+        let newest = dir
+            .join("checkpoints")
+            .join(format!("{:06}", sealed.generation));
+        let manifest_path = dir.join("manifest");
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| DcrError::Io(e.to_string()))?;
+        let rolled = manifest.replace(
+            &format!("\"highest_generation\":{}", sealed.generation),
+            &format!("\"highest_generation\":{}", sealed.generation - 1),
+        );
+        std::fs::remove_file(&newest).map_err(|e| DcrError::Io(e.to_string()))?;
+        std::fs::write(&manifest_path, &rolled).map_err(|e| DcrError::Io(e.to_string()))?;
+
+        all &= report(
+            "roll back to an older signed state",
+            matches!(
+                ContextStore::open(&dir),
+                Err(crate::context_store::ContextError::Rollback { .. })
+            ),
+            "generation high-water mark",
+        );
+    }
+
+    println!("{line}");
+    println!(
+        "  What this does NOT show: resistance to an attacker who rewrites the objects,\n  \
+         the chain, the manifest and the high-water mark together. Hashes make tampering\n  \
+         evident, not impossible — signatures and an out-of-band high-water mark are what\n  \
+         raise that bar, and neither is bundled."
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    if !all {
+        return Err(DcrError::Parse(
+            "a tamper case went undetected".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+// -- the discriminating corpus --------------------------------------------
+
+/// A corpus built to separate DCR from a good retriever.
+///
+/// On the standard corpus, plain top-k RAG ties full context at 5/7 — it
+/// answers most probes because most probes are findable by similarity. That
+/// makes the headline number look better than the evidence supports, and it
+/// tells you almost nothing about whether the graph and the ladder are earning
+/// their complexity.
+///
+/// These five probes are chosen so that similarity is actively *misleading*, or
+/// so that answering at all is the wrong behaviour:
+///
+/// | probe | what it attacks |
+/// |---|---|
+/// | lexical decoy | the superseded value repeats the query's words; the correction does not |
+/// | three-hop | the answer shares no vocabulary with the question |
+/// | stale derivation | the tempting figure is arithmetically dead |
+/// | absent fact | nothing in history answers it |
+/// | contested fact | two claims disagree and neither is corrective |
+///
+/// Two of them (stale derivation, absent fact) are **refusal** probes: they are
+/// passed by declining, and DCR can fail them exactly as easily as a baseline
+/// can. One (contested fact) no truncation or top-k baseline can pass by
+/// construction, and the table says so rather than quietly banking the point.
+///
+/// **Vocabulary hygiene matters more than it looks.** An earlier draft of this
+/// corpus used "cache hit rate", "build" and "runbook" — all of which appear in
+/// `NOISE`. The probes then measured a collision with the noise generator
+/// rather than the property they named, and every column failed for the same
+/// uninteresting reason. Subjects here are chosen to appear nowhere else in the
+/// corpus.
+pub fn build_adversarial_corpus(turns: usize) -> Corpus {
+    let mut docs: Vec<(String, String)> = Vec::new();
+    let mut add = |id: &str, text: &str| docs.push((id.to_string(), text.to_string()));
+
+    add("a000", "Goal: bring checkout p99 latency under 250ms.");
+
+    // 1. Lexical decoy. The stale document repeats the query's words four
+    //    times; the correction states the same key once and moves on. Both
+    //    carry the *same* key, so supersession can fire — which is the point.
+    //    If the runtime is riding on lexical attraction rather than the
+    //    supersession edge, it serves 91.
+    add(
+        "a001",
+        "The shard rebalance ratio is 91 percent. The shard rebalance ratio was measured across \
+         every shard rebalance window, and the shard rebalance ratio reported by the shard \
+         rebalance controller agrees with the shard rebalance ratio in the ledger.",
+    );
+
+    // 2. Three-hop chain. "primary datastore" appears only in the first hop;
+    //    the rack only in the third. Nothing shares vocabulary end to end.
+    add("a002", "The primary datastore is postgres-11.");
+    add("a003", "postgres-11 runs on host db-a-14.");
+    add("a004", "Host db-a-14 is installed in rack R-19.");
+
+    // 3. A derived figure that names its inputs, one of which is corrected
+    //    later. After the correction 2160 is arithmetically dead, and serving
+    //    it is wrong even though it is stated verbatim in history.
+    add(
+        "a005",
+        "The engineer count is 3, the incident hours are 4, and the hourly rate is 180 USD.",
+    );
+    add(
+        "a006",
+        "The incident cost estimate is 2160 USD, computed from the engineer count, the incident \
+         hours and the hourly rate.",
+    );
+
+    // 4. Adjacent material for the absent-fact probe: an escalation policy
+    //    exists, a phone number does not.
+    add(
+        "a007",
+        "The severity-1 paging ladder is defined in policy document 12, which covers escalation \
+         order.",
+    );
+
+    // 5. Two live claims on the same key that disagree, neither phrased as a
+    //    correction, so supersession must NOT fire and both stay live.
+    // Phrased in the `subject is value` shape the scanner handles, so this
+    // probe tests contradiction *marking* rather than extraction coverage.
+    // The extractor's blind spots are a separate finding, recorded in TODO.md.
+    add("a008", "The rollout outcome is reverted after readiness failures.");
+    add("a009", "The rollout outcome is completed successfully across the fleet.");
+
+    let fixed = docs.len();
+    let corrections: [(usize, &str); 2] = [
+        (
+            (turns as f64 * 0.75) as usize,
+            "Correction: the shard rebalance ratio is 62 percent.",
+        ),
+        (
+            (turns as f64 * 0.85) as usize,
+            "Correction: the hourly rate is 210 USD, finance updated the figure.",
+        ),
+    ];
+    for i in fixed..turns.max(fixed + 1) {
+        let id = format!("a{i:03}");
+        match corrections.iter().find(|(at, _)| *at == i) {
+            Some((_, text)) => docs.push((id, text.to_string())),
+            None => docs.push((id, NOISE[i % NOISE.len()].replace("{n}", &i.to_string()))),
+        }
+    }
+
+    let probes = vec![
+        Probe::recall(
+            "what is the shard rebalance ratio?",
+            "62",
+            "lexical decoy on a stale fact",
+        ),
+        Probe::assembled(
+            "which rack is the primary datastore in?",
+            "R-19",
+            "three-hop dependency (context)",
+        ),
+        Probe::refuse(
+            "what is the incident cost estimate?",
+            "2160",
+            "stale derivation (must refuse)",
+        ),
+        Probe::refuse(
+            "what is the severity-1 pager phone number?",
+            "policy document 12",
+            "absent fact (must refuse)",
+        ),
+        Probe::assembled(
+            "what is the rollout outcome?",
+            "CONTRADICTS",
+            "contested fact (order decides)",
+        ),
+    ];
+    Corpus { docs, probes }
 }

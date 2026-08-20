@@ -74,3 +74,27 @@ class Restatement(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VerbPhrasedCorrections(unittest.TestCase):
+    """Corrections in the wild carry verbs; a copula-only extractor drops them."""
+
+    def test_transitions_are_extracted(self) -> None:
+        ex = HeuristicExtractor()
+        for text in (
+            "The primary datastore has moved to postgres-15.",
+            "The primary datastore was replaced by postgres-15.",
+            "The primary datastore changed to postgres-15.",
+            "The primary datastore should be postgres-15.",
+            "The primary datastore is now postgres-15.",
+            "The primary datastore was migrated and is now postgres-15.",
+        ):
+            values = [v for k, v in ex._assignments(text) if k == "primary.datastore"]
+            self.assertTrue(
+                any("postgres-15" in v for v in values),
+                f"{text!r} extracted {values}",
+            )
+            self.assertFalse(
+                any("postgres-11" in v for v in values),
+                f"{text!r} also extracted a stale value: {values}",
+            )

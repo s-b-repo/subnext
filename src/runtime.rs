@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use crate::context_store::{Checkpoint, ContextError, ContextStore, ObjectKind, ObjectRecord};
 use crate::execute::{ExecutionLayer, Inputs};
 use crate::graph::{DcrError, MemoryGraph};
 use crate::ids::Clock;
@@ -23,7 +24,7 @@ use crate::json::{Json, parse};
 use crate::ladder::{Ladder, Level};
 use crate::llm::{LocalReasoner, REASONER_SYSTEM, Reasoner, parse_escalation};
 use crate::nodes::{
-    Derivation, EdgeType, Kind, LevelCache, NewNode, Node, NodeIdx, NodeMeta, Status,
+    Derivation, EdgeType, Kind, LevelCache, NewNode, Node, NodeIdx, NodeMeta, Origin, Status,
 };
 use crate::planner::{ActiveContext, PlanCtx, RelevancePlanner, Weights};
 use crate::policy::DecisionPolicy;
@@ -31,6 +32,7 @@ use crate::spans::{Document, RawStore, Span};
 use crate::speculation::Speculator;
 use crate::telemetry::{Telemetry, Turn};
 use crate::tokens::Estimator;
+use crate::trust::Signer;
 
 use std::cell::{Cell, RefCell};
 
@@ -70,6 +72,8 @@ pub struct Dcr {
     /// query-layer degradation check cannot see. Credit: this metric was
     /// proposed by the commenter "vespermind" against the DCR report.
     assembled_spans: std::collections::HashSet<String>,
+    /// Ordered pairs of spans ever rendered at L0 in the *same* window.
+    assembled_pairs: std::collections::HashSet<(String, String)>,
     reasoner: Box<dyn Reasoner>,
 }
 
@@ -102,6 +106,7 @@ impl Dcr {
             budget,
             max_escalations: 2,
             assembled_spans: std::collections::HashSet::new(),
+            assembled_pairs: std::collections::HashSet::new(),
             reasoner: Box::new(LocalReasoner::new()),
         }
     }
@@ -318,6 +323,7 @@ impl Dcr {
     /// does. Spans that never appear here were ingested, indexed, and never
     /// looked at; that is where a confident wrong answer comes from.
     fn mark_assembled(&mut self, context: &ActiveContext) {
+        let mut shown_this_turn: Vec<String> = Vec::new();
         for entry in &context.entries {
             // Only L0 renders a span's actual bytes. L1 summarises, and L2/L3
             // convey a value derived from the spans — and because corroboration
@@ -332,6 +338,18 @@ impl Dcr {
             }
             for span in &self.graph.node(entry.node).source_spans {
                 self.assembled_spans.insert(span.clone());
+                shown_this_turn.push(span.clone());
+            }
+        }
+        // Co-occurrence, not just occurrence. A reviewer pointed out that span
+        // coverage is unconditioned along one axis only: A and B can each be
+        // covered while never once appearing together, and a multi-hop answer
+        // needing both in scope fails while both look healthy in the table.
+        shown_this_turn.sort();
+        shown_this_turn.dedup();
+        for (i, a) in shown_this_turn.iter().enumerate() {
+            for b in &shown_this_turn[i + 1..] {
+                self.assembled_pairs.insert((a.clone(), b.clone()));
             }
         }
     }
@@ -355,6 +373,56 @@ impl Dcr {
                 0.0
             } else {
                 assembled as f64 / total as f64
+            },
+        }
+    }
+
+    /// Co-occurrence coverage: of the span pairs the graph says are
+    /// load-bearing together, how many have ever been in the same window?
+    ///
+    /// Span coverage answers "was this ever rendered". It does not answer "was
+    /// it ever rendered *alongside* the thing that makes it matter" — a
+    /// reviewer's point, and it bounds what [`Self::coverage`] can claim. An
+    /// answer needing A and B in scope simultaneously can fail while both spans
+    /// sit in the covered column.
+    ///
+    /// Enumerating all pairs is `O(N^2)` and mostly meaningless, since most
+    /// pairs are unrelated. The denominator here is the set the graph already
+    /// knows about: for every dependency edge, the cross product of the two
+    /// nodes' source spans. That is where co-occurrence is load-bearing, it is
+    /// `O(edges)` rather than `O(N^2)`, and the map is already in the graph
+    /// rather than needing to be inferred.
+    pub fn pair_coverage(&self) -> PairCoverage {
+        let mut linked: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for node in self.graph.nodes() {
+            for dep_id in &node.dependencies {
+                let Some(dep_idx) = self.graph.idx_of(dep_id) else {
+                    continue;
+                };
+                for a in &node.source_spans {
+                    for b in &self.graph.node(dep_idx).source_spans {
+                        if a == b {
+                            continue;
+                        }
+                        let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+                        linked.insert((lo.clone(), hi.clone()));
+                    }
+                }
+            }
+        }
+        let covered = linked
+            .iter()
+            .filter(|pair| self.assembled_pairs.contains(*pair))
+            .count();
+        let total = linked.len();
+        PairCoverage {
+            linked_pairs: total,
+            covered_pairs: covered,
+            fraction: if total == 0 {
+                0.0
+            } else {
+                covered as f64 / total as f64
             },
         }
     }
@@ -550,7 +618,15 @@ impl Dcr {
 
     // -- reporting ---------------------------------------------------------
     pub fn report(&self) -> String {
-        let mut out = self.telemetry.report().to_string();
+        // Publish the speculator's counters through the same report as the
+        // rest of the evaluation metrics, rather than only in its own line.
+        let mut telemetry = self.telemetry.clone();
+        telemetry.record_prefetch(
+            self.speculator.issued,
+            self.speculator.hits,
+            self.speculator.wasted_builds,
+        );
+        let mut out = telemetry.report().to_string();
         out.push_str(&format!("\n[graph]\n  {}\n", self.graph.stats()));
         out.push_str(&format!("[index]\n  {}\n", self.index.stats()));
         out.push_str(&format!("[execution]\n  {}\n", self.execution.stats()));
@@ -661,6 +737,253 @@ impl Dcr {
             }
         }
         std::fs::write(path, payload.to_json_string()).map_err(|e| DcrError::Io(e.to_string()))
+    }
+
+    /// Persist into a `.context` container and seal it as a new generation.
+    ///
+    /// Same state as [`Dcr::save`], written as immutable content-addressed
+    /// objects under a Merkle root instead of one rewritable file. The
+    /// difference that matters is not the layout: a `.dcr.json` that has been
+    /// edited reloads without complaint, and an edited container does not.
+    ///
+    /// Nodes are written as derived objects citing the spans they came from,
+    /// so the provenance rule the graph enforces in memory is enforced again
+    /// by the store on the way to disk.
+    pub fn save_context(
+        &self,
+        dir: &Path,
+        signer: Option<&dyn Signer>,
+    ) -> Result<Checkpoint, DcrError> {
+        let mut store = match ContextStore::open(dir) {
+            Ok(store) => store,
+            Err(ContextError::Io(_)) => {
+                ContextStore::create(dir, "dcr").map_err(context_err)?
+            }
+            Err(e) => return Err(context_err(e)),
+        };
+
+        // L0 first: spans cite documents, nodes cite spans, so every object
+        // exists before anything points at it.
+        let mut doc_objects: HashMap<String, String> = HashMap::new();
+        for document in self.raw.documents() {
+            let record = ObjectRecord::new(
+                ObjectKind::Document,
+                &document.id,
+                Json::obj(vec![
+                    ("text", Json::str(&document.text)),
+                    ("ts", Json::num(document.ts as f64)),
+                    (
+                        "source",
+                        document.source.clone().map_or(Json::Null, Json::Str),
+                    ),
+                ]),
+            );
+            let id = store.put(record).map_err(context_err)?;
+            doc_objects.insert(document.id.clone(), id);
+        }
+
+        let mut span_objects: HashMap<String, String> = HashMap::new();
+        for span in self.raw.spans() {
+            let parent = doc_objects.get(&span.doc_id).cloned();
+            let mut record = ObjectRecord::new(
+                ObjectKind::Span,
+                &span.id,
+                Json::obj(vec![
+                    ("doc_id", Json::str(&span.doc_id)),
+                    ("start", Json::num(span.start as f64)),
+                    ("end", Json::num(span.end as f64)),
+                    ("seq", Json::num(span.seq as f64)),
+                    ("ts", Json::num(span.ts as f64)),
+                ]),
+            );
+            if let Some(parent) = parent {
+                record = record.derived_from(vec![parent]);
+            }
+            let id = store.put(record).map_err(context_err)?;
+            span_objects.insert(span.id.clone(), id);
+        }
+
+        let mut usage: Vec<(String, Json)> = Vec::new();
+        for node in self.graph.nodes() {
+            let sources: Vec<String> = node
+                .source_spans
+                .iter()
+                .filter_map(|span_id| span_objects.get(span_id).cloned())
+                .collect();
+            // Read counters move to a single usage object. Left in the node,
+            // they would give every admitted node a new address on every
+            // query, and the store would grow with reads rather than with what
+            // it actually knows.
+            usage.push((
+                node.id.clone(),
+                Json::obj(vec![
+                    ("reads", Json::num(node.reads.get() as f64)),
+                    ("admits", Json::num(node.admits.get() as f64)),
+                    ("l0_reads", Json::num(node.meta.l0_reads.get() as f64)),
+                    ("l0_yield", Json::num(node.meta.l0_yield.get() as f64)),
+                ]),
+            ));
+            let mut record =
+                ObjectRecord::new(ObjectKind::Node, &node.id, node_object(node));
+            // A node grounded only in other nodes still has provenance; it is
+            // the ungrounded one the store must refuse.
+            if !sources.is_empty() || !node.dependencies.is_empty() {
+                record = record.derived_from(if sources.is_empty() {
+                    node.dependencies.clone()
+                } else {
+                    sources
+                });
+            }
+            store.put(record).map_err(context_err)?;
+        }
+
+        for idx in 0..self.graph.len() {
+            for edge in self.graph.out_edges(idx) {
+                let (src, dst) = (
+                    self.graph.node(edge.src).id.clone(),
+                    self.graph.node(edge.dst).id.clone(),
+                );
+                let record = ObjectRecord::new(
+                    ObjectKind::Edge,
+                    format!("{src}->{dst}:{}", edge.kind.as_str()),
+                    Json::obj(vec![
+                        ("src", Json::str(&src)),
+                        ("dst", Json::str(&dst)),
+                        ("type", Json::str(edge.kind.as_str())),
+                    ]),
+                );
+                store.put(record).map_err(context_err)?;
+            }
+        }
+
+        usage.sort_by(|a, b| a.0.cmp(&b.0));
+        if !usage.is_empty() {
+            store
+                .put(ObjectRecord::new(
+                    ObjectKind::Usage,
+                    "usage",
+                    Json::Obj(usage),
+                ))
+                .map_err(context_err)?;
+        }
+
+        store
+            .commit(self.clock.now(), signer)
+            .map_err(context_err)
+    }
+
+    /// Open a `.context` container.
+    ///
+    /// Every object goes through [`ContextStore::admit`] on the way in, so
+    /// nothing reaches the graph that failed integrity, provenance, generation,
+    /// schema or policy. A refused object is an error, not a warning: a
+    /// partially admitted memory is worse than one that refuses to open.
+    pub fn open_context(dir: &Path, budget: usize) -> Result<Dcr, DcrError> {
+        let store = ContextStore::open(dir).map_err(context_err)?;
+        let mut runtime = Dcr::new(budget);
+
+        let mut documents: Vec<Document> = Vec::new();
+        let mut spans: Vec<Span> = Vec::new();
+        let mut nodes: Vec<Json> = Vec::new();
+        let mut edges: Vec<(String, String, EdgeType)> = Vec::new();
+        let mut usage: Vec<(String, Json)> = Vec::new();
+
+        let ids: Vec<String> = store.object_ids().cloned().collect();
+        for id in ids {
+            let (record, _admitted) = store.admit(&id, None).map_err(context_err)?;
+            let body = &record.body;
+            match record.kind {
+                ObjectKind::Document => documents.push(Document {
+                    id: record.logical_id.clone(),
+                    text: body
+                        .get("text")
+                        .and_then(Json::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    ts: body.get("ts").and_then(Json::as_u64).unwrap_or(0),
+                    source: body.get("source").and_then(Json::as_str).map(str::to_string),
+                }),
+                ObjectKind::Span => spans.push(Span {
+                    id: record.logical_id.clone(),
+                    doc_id: body
+                        .get("doc_id")
+                        .and_then(Json::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    start: body.get("start").and_then(Json::as_usize).unwrap_or(0),
+                    end: body.get("end").and_then(Json::as_usize).unwrap_or(0),
+                    seq: body.get("seq").and_then(Json::as_usize).unwrap_or(0),
+                    ts: body.get("ts").and_then(Json::as_u64).unwrap_or(0),
+                }),
+                ObjectKind::Node => nodes.push(body.clone()),
+                ObjectKind::Usage => {
+                    // Later generations win: usage is a running total, and the
+                    // newest object is the current one.
+                    if let Json::Obj(pairs) = body {
+                        if record.generation
+                            >= usage.first().map(|_| record.generation).unwrap_or(0)
+                        {
+                            usage = pairs.clone();
+                        }
+                    }
+                }
+                ObjectKind::Edge => {
+                    if let (Some(src), Some(dst), Some(kind)) = (
+                        body.get("src").and_then(Json::as_str),
+                        body.get("dst").and_then(Json::as_str),
+                        body.get("type")
+                            .and_then(Json::as_str)
+                            .and_then(EdgeType::parse),
+                    ) {
+                        edges.push((src.to_string(), dst.to_string(), kind));
+                    }
+                }
+            }
+        }
+
+        // Insertion order is load-bearing for spans (seq) and for the graph's
+        // own indices, so restore in the order the runtime wrote them.
+        documents.sort_by(|a, b| a.ts.cmp(&b.ts).then(a.id.cmp(&b.id)));
+        spans.sort_by(|a, b| a.seq.cmp(&b.seq));
+        let clock = spans.iter().map(|s| s.ts).max().unwrap_or(0);
+        runtime.raw.restore(documents, spans);
+
+        nodes.sort_by_key(|n| n.get("timestamp").and_then(Json::as_u64).unwrap_or(0));
+        for node in &nodes {
+            runtime.graph.insert_restored(node_from_json(node));
+        }
+        for (src, dst, kind) in edges {
+            runtime.graph.restore_edge(&src, &dst, kind);
+        }
+        for (node_id, counters) in &usage {
+            let Some(idx) = runtime.graph.idx_of(node_id) else {
+                continue;
+            };
+            let node = runtime.graph.node(idx);
+            let count = |name: &str| counters.get(name).and_then(Json::as_u64).unwrap_or(0) as u32;
+            node.reads.set(count("reads"));
+            node.admits.set(count("admits"));
+            node.meta.l0_reads.set(count("l0_reads"));
+            node.meta.l0_yield.set(count("l0_yield"));
+        }
+        runtime.clock.restore(
+            clock.max(
+                nodes
+                    .iter()
+                    .filter_map(|n| n.get("timestamp").and_then(Json::as_u64))
+                    .max()
+                    .unwrap_or(0),
+            ),
+        );
+
+        for idx in 0..runtime.raw.len() {
+            let text = runtime.raw.text_of(&runtime.raw.span(idx).id).to_string();
+            runtime.index.add_span(idx, &text);
+        }
+        for idx in 0..runtime.graph.len() {
+            runtime.reindex(idx);
+        }
+        Ok(runtime)
     }
 
     pub fn load(path: &Path, budget: usize) -> Result<Dcr, DcrError> {
@@ -788,6 +1111,16 @@ pub struct Coverage {
     pub fraction: f64,
 }
 
+/// The two-dimensional dual of [`Coverage`]: see [`Dcr::pair_coverage`].
+#[derive(Debug, Clone, Copy)]
+pub struct PairCoverage {
+    /// Span pairs joined by a dependency edge — where co-occurrence matters.
+    pub linked_pairs: usize,
+    /// Of those, how many were ever rendered at L0 in the same window.
+    pub covered_pairs: usize,
+    pub fraction: f64,
+}
+
 impl std::fmt::Display for Coverage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -826,8 +1159,47 @@ impl std::fmt::Display for RebuildReport {
     }
 }
 
+/// Container failures become `DcrError`s at the runtime boundary, keeping the
+/// distinction the message carries: refused, rolled back and corrupt are not
+/// the same event, and flattening them to "load failed" would lose the only
+/// information an operator can act on.
+fn context_err(error: ContextError) -> DcrError {
+    match error {
+        ContextError::Io(m) => DcrError::Io(m),
+        other => DcrError::Parse(other.to_string()),
+    }
+}
+
 fn strings(values: &[String]) -> Json {
     Json::Arr(values.iter().map(Json::str).collect())
+}
+
+/// A node as an immutable container object: everything [`node_to_json`] holds
+/// except the read counters, which are usage rather than content.
+fn node_object(node: &Node) -> Json {
+    const VOLATILE: [&str; 2] = ["reads", "admits"];
+    const VOLATILE_META: [&str; 2] = ["l0_reads", "l0_yield"];
+    let Json::Obj(fields) = node_to_json(node) else {
+        return node_to_json(node);
+    };
+    Json::Obj(
+        fields
+            .into_iter()
+            .filter(|(key, _)| !VOLATILE.contains(&key.as_str()))
+            .map(|(key, value)| match (key.as_str(), &value) {
+                ("meta", Json::Obj(meta)) => (
+                    key.clone(),
+                    Json::Obj(
+                        meta.iter()
+                            .filter(|(k, _)| !VOLATILE_META.contains(&k.as_str()))
+                            .cloned()
+                            .collect(),
+                    ),
+                ),
+                _ => (key, value),
+            })
+            .collect(),
+    )
 }
 
 fn node_to_json(node: &Node) -> Json {
@@ -849,6 +1221,7 @@ fn node_to_json(node: &Node) -> Json {
     Json::obj(vec![
         ("node_id", Json::str(&node.id)),
         ("kind", Json::str(node.kind.as_str())),
+        ("origin", Json::str(node.origin.as_str())),
         ("value", Json::str(&node.value)),
         ("source_spans", strings(&node.source_spans)),
         ("dependencies", strings(&node.dependencies)),
@@ -952,6 +1325,14 @@ fn node_from_json(data: &Json) -> Node {
             .and_then(Json::as_str)
             .and_then(Kind::parse)
             .unwrap_or(Kind::Claim),
+        // A store written before origins existed holds material this runtime
+        // read directly, so `observed` is the honest default rather than a
+        // placeholder — same forward-compatibility rule as the fields above.
+        origin: data
+            .get("origin")
+            .and_then(Json::as_str)
+            .and_then(Origin::parse)
+            .unwrap_or_default(),
         value: data
             .get("value")
             .and_then(Json::as_str)

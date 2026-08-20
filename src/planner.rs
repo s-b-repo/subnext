@@ -437,12 +437,29 @@ impl RelevancePlanner {
         let mut seeds: Vec<(NodeIdx, f32)> = Vec::new();
         for (idx, score) in hits {
             let node = ctx.graph.node(idx);
+            // Evidence whose every live dependent has been superseded supports
+            // nothing current, and it still carries the old value verbatim. It
+            // used to be admitted with a NOTE telling the model not to treat it
+            // as current, which is only a guard if the model reads notes: on the
+            // adversarial mutation set the superseded sentence out-scores the
+            // correction on lexical overlap, so a matcher that ignores the note
+            // answers from it every time. Exclude it from seeding for the same
+            // reason a superseded claim is excluded. `corrected_by` evidence is
+            // deliberately left in — it still supports live facts, so its note
+            // has to do the work.
+            if node.meta.superseded_source && !self.admit_stale {
+                active.stale_seen.push(idx);
+                continue;
+            }
             match node.status {
                 Status::Superseded => continue,
                 // Never seed from a stale node without re-grounding it first —
                 // unless the negative control has bypassed the guard.
                 Status::Stale if !self.admit_stale => active.stale_seen.push(idx),
-                Status::Stale | Status::Fresh => seeds.push((idx, score)),
+                // Contradicted and unresolved nodes seed like fresh ones: they
+                // are current, and they carry their marker into the window.
+                status if status.is_live() || self.admit_stale => seeds.push((idx, score)),
+                _ => continue,
             }
         }
         // Fall back to the raw lexical index when state search finds nothing —

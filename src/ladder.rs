@@ -21,7 +21,7 @@
 use std::cell::Cell;
 
 use crate::embed::{DIM, cosine, hashing_embed};
-use crate::nodes::{Kind, Node, Status};
+use crate::nodes::{Kind, Node, Origin, Status};
 use crate::spans::RawStore;
 use crate::summarize::ExtractiveSummarizer;
 use crate::text::clip;
@@ -202,12 +202,17 @@ impl Ladder {
         if node.status != Status::Fresh {
             bits.push(format!("status={}", node.status.as_str()));
         }
+        // Derived material says so. An inference or a hypothesis that reads
+        // like an observation is the failure this label exists to prevent.
+        if node.origin != Origin::Observed {
+            bits.push(format!("origin={}", node.origin.as_str()));
+        }
         if !node.source_spans.is_empty() {
             bits.push(format!("spans={}", join_head(&node.source_spans, 3)));
         } else if !node.dependencies.is_empty() {
             bits.push(format!("via={}", join_head(&node.dependencies, 3)));
         }
-        if node.status == Status::Fresh && !node.meta.contradicts.is_empty() {
+        if node.status.is_live() && !node.meta.contradicts.is_empty() {
             bits.push(format!(
                 "CONTRADICTS={} \u{2014} adjudicate, do not pick blindly",
                 join_head(&node.meta.contradicts, 2)

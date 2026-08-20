@@ -89,6 +89,56 @@ impl Json {
         out
     }
 
+    /// The encoding that gets hashed.
+    ///
+    /// `to_json_string` preserves insertion order, which is stable *per run*
+    /// but is a property of how the value was built. A digest has to be a
+    /// property of the value itself, so the canonical form sorts object keys,
+    /// drops repeated keys (keeping the first, which is the one [`Json::get`]
+    /// returns), and writes non-finite numbers as `null` rather than emitting
+    /// the invalid JSON tokens `NaN` and `inf`.
+    ///
+    /// Everything in the container is addressed by the digest of this form:
+    /// re-serialising a loaded object must reproduce its id, or the store
+    /// would quarantine its own contents on the next scrub.
+    pub fn to_canonical_string(&self) -> String {
+        let mut out = String::new();
+        self.write_canonical(&mut out);
+        out
+    }
+
+    fn write_canonical(&self, out: &mut String) {
+        match self {
+            Json::Num(n) if !n.is_finite() => out.push_str("null"),
+            Json::Arr(items) => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    item.write_canonical(out);
+                }
+                out.push(']');
+            }
+            Json::Obj(pairs) => {
+                let mut sorted: Vec<&(String, Json)> = pairs.iter().collect();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                sorted.dedup_by(|a, b| a.0 == b.0);
+                out.push('{');
+                for (i, (key, value)) in sorted.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    write_string(key, out);
+                    out.push(':');
+                    value.write_canonical(out);
+                }
+                out.push('}');
+            }
+            other => other.write(out),
+        }
+    }
+
     fn write(&self, out: &mut String) {
         match self {
             Json::Null => out.push_str("null"),

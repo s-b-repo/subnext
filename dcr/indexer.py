@@ -57,7 +57,16 @@ _ASSIGN = re.compile(
     # lets mid-sentence corrections ("actually the server ip is …") match too.
     r"(?:^|[,;(]\s*|\bthe\s+|\bactually\s+|\bnow\s+|\bcurrent\s+)"
     r"(?P<key>[A-Za-z][\w-]*(?:[ .][A-Za-z][\w-]*){0,2}?)\s*"
-    r"(?:=|:|\bis\b|\bwas\b|\bare\b|\bwere\b)\s+"
+    # Multi-word transitions first: corrections in the wild carry verbs, and
+    # a copula-only pattern silently drops most of them. Longest-first so
+    # "was replaced by" is not read as the copula "was". Phrasings whose
+    # subject follows the verb ("we switched X to Y") are deliberately absent
+    # — they need a different rule and guessing would over-extract.
+    r"(?:=|:"
+    r"|\bhas moved to\b|\bhave moved to\b|\bhas changed to\b|\bhave changed to\b"
+    r"|\bwas replaced by\b|\bwere replaced by\b|\bis replaced by\b|\bwas changed to\b"
+    r"|\bmoved to\b|\bchanged to\b|\bshould be\b"
+    r"|\bis\b|\bwas\b|\bare\b|\bwere\b)\s+"
     # A value ends at a clause boundary, not at the first period — otherwise
     # every dotted identifier (10.0.4.12, api.v2.stats) is truncated.
     r"(?P<value>[^,;\n]{1,120}?)"

@@ -136,3 +136,72 @@ fn a_fronted_adverb_is_not_part_of_the_value() {
         .expect("claim on failover.region");
     assert_eq!(c.value, "eu-central-1", "the adverb leaked into the value");
 }
+
+/// Corrections in the wild carry verbs. A copula-only extractor drops most of
+/// them silently — no fact at all, rather than a wrong one — which is the
+/// quieter half of the `migrated` bug.
+#[test]
+fn corrections_phrased_with_verbs_are_extracted() {
+    use dcr::indexer::HeuristicExtractor;
+    let ex = HeuristicExtractor::default();
+    for text in [
+        "The primary datastore has moved to postgres-15.",
+        "The primary datastore was replaced by postgres-15.",
+        "The primary datastore changed to postgres-15.",
+        "The primary datastore should be postgres-15.",
+        "The primary datastore is now postgres-15.",
+        "The primary datastore was migrated and is now postgres-15.",
+    ] {
+        let values: Vec<String> = ex
+            .extract(text)
+            .into_iter()
+            .filter(|p| p.key.as_deref() == Some("primary.datastore"))
+            .map(|p| p.value)
+            .collect();
+        assert!(
+            values.iter().any(|v| v.contains("postgres-15")),
+            "{text:?} extracted {values:?}, expected the value after the transition"
+        );
+        assert!(
+            !values.iter().any(|v| v.contains("postgres-11")),
+            "{text:?} also extracted a stale value: {values:?}"
+        );
+    }
+}
+
+/// The point of the adversarial set: when the superseded value is the better
+/// lexical match, only supersession can produce the right answer. If this ever
+/// passes with supersession disabled, the set has stopped being adversarial.
+#[test]
+fn supersession_beats_lexical_attraction() {
+    use dcr::bench::{build_mutation_corpus_from, ADVERSARIAL};
+    use dcr::llm::LocalReasoner;
+    use dcr::runtime::Dcr;
+
+    let run = |supersede: bool| {
+        let corpus = build_mutation_corpus_from(300, ADVERSARIAL);
+        let mut rt = Dcr::new(1200);
+        rt.indexer.supersede_on_conflict = supersede;
+        for (id, t) in &corpus.docs {
+            rt.ingest(t, Some(id)).expect("ingest");
+        }
+        let mut r = LocalReasoner::new();
+        ADVERSARIAL
+            .iter()
+            .filter(|m| {
+                rt.ask_with(m.query, None, &mut r)
+                    .text
+                    .to_lowercase()
+                    .contains(&m.stale.to_lowercase())
+            })
+            .count()
+    };
+    assert_eq!(run(true), 0, "the full runtime served a superseded value");
+    assert_eq!(
+        run(false),
+        ADVERSARIAL.len(),
+        "with supersession off the stale value should win every case — if it \
+         does not, the stale node is not actually the more attractive target \
+         and the set proves nothing"
+    );
+}

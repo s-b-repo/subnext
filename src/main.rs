@@ -17,12 +17,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use dcr::bench::{
-    run_ablation, run_benchmark, run_coverage, run_mutation_probe, run_poison, run_scaling,
-    run_sweep,
+    run_ablation, run_baselines, run_benchmark, run_coverage, run_mutation_probe, run_poison,
+    run_rebuild, run_scaling, run_sweep, run_tamper,
 };
 use dcr::demo::run_demo;
 use dcr::graph::DcrError;
+use dcr::context_store::ContextStore;
 use dcr::runtime::Dcr;
+use dcr::scrub::{ScrubOptions, scrub};
 
 const DEFAULT_STORE: &str = ".dcr.json";
 const USAGE: &str = "\
@@ -36,6 +38,10 @@ commands:
   plan <query> [--explain]    show the active context without calling a model
   explain <node_id>           audit path from a node down to raw spans
   stats                       telemetry report
+  verify                      check a .context container: objects, chain, root
+  scrub [--repair]            detect bit rot; repair from a verified replica
+  checkpoint                  seal the current state as a new generation
+  quarantine                  list objects that failed verification
   demo                        worked example through all four ladder levels
   bench [--turns N] [--window N]
                               DCR vs full context vs sliding window
@@ -45,9 +51,16 @@ commands:
         --sweep               correctness and cost against B_attention
         --coverage            read coverage as history grows (offline dual)
         --poison              positive control: can stale_fact_read_rate fire?
+        --baselines           DCR vs RAG, summarize-all and recursive context
+        --rebuild             what does destroying and rebuilding the workspace cost?
+        --tamper              can the container actually detect tampering?
 
 options:
-  --store PATH                persisted memory (default: .dcr.json)
+  --store PATH                persisted memory (default: .dcr.json).
+                              No extension (.context, memory/) is a tamper-evident
+                              container; a file extension is the plain JSON store.
+  --replica PATH              extra full copy of the object store; repeatable.
+                              Repair reads only from a copy that verifies.
   --budget N                  B_attention, in tokens (default: 1200)
 ";
 
@@ -59,6 +72,7 @@ struct Args {
     flags: Vec<String>,
     turns: usize,
     window: usize,
+    replicas: Vec<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -69,11 +83,15 @@ fn parse_args() -> Result<Args, String> {
     let mut command = String::new();
     let mut positional = Vec::new();
     let mut flags = Vec::new();
+    let mut replicas: Vec<PathBuf> = Vec::new();
 
     let mut argv = std::env::args().skip(1);
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--store" => store = PathBuf::from(argv.next().ok_or("--store needs a path")?),
+            "--replica" => {
+                replicas.push(PathBuf::from(argv.next().ok_or("--replica needs a path")?))
+            }
             "--budget" => {
                 budget = argv
                     .next()
@@ -112,10 +130,44 @@ fn parse_args() -> Result<Args, String> {
         flags,
         turns,
         window,
+        replicas,
     })
 }
 
+/// Which format `--store` names.
+///
+/// An existing directory is a container. A path that does not exist yet is a
+/// container when it has no file extension (`.context`, `memory/`) and a plain
+/// JSON store when it has one (`.dcr.json`) — so the same flag creates either,
+/// the default `.dcr.json` keeps working, and the choice can be read off the
+/// path instead of remembered. A leading dot is not an extension, which is
+/// what makes `.context` a directory rather than a file.
+fn is_container(store: &Path) -> bool {
+    if store.is_dir() {
+        return true;
+    }
+    if store.is_file() {
+        return false;
+    }
+    store.extension().is_none()
+}
+
+/// Does a container already exist here, as opposed to being where one goes?
+fn container_exists(store: &Path) -> bool {
+    store.join("manifest").is_file()
+}
+
 fn open(store: &Path, budget: usize) -> Result<Dcr, DcrError> {
+    if is_container(store) {
+        if !container_exists(store) {
+            // The directory is where the container will be written, not one to
+            // read. First ingest creates it.
+            return Ok(Dcr::new(budget));
+        }
+        let mut runtime = Dcr::open_context(store, budget)?;
+        runtime.set_budget(budget);
+        return Ok(runtime);
+    }
     if store.exists() {
         let mut runtime = Dcr::load(store, budget)?;
         runtime.set_budget(budget);
@@ -123,6 +175,37 @@ fn open(store: &Path, budget: usize) -> Result<Dcr, DcrError> {
     } else {
         Ok(Dcr::new(budget))
     }
+}
+
+/// Persist back to whichever format the store is in. Sealing a container is a
+/// new generation, so every write is an appended, chained state rather than an
+/// overwrite.
+fn persist(runtime: &Dcr, store: &Path) -> Result<(), DcrError> {
+    if is_container(store) {
+        let checkpoint = runtime.save_context(store, None)?;
+        println!(
+            "generation {} · root {} · {} objects",
+            checkpoint.generation,
+            checkpoint.merkle_root.short(12),
+            checkpoint.object_count
+        );
+        Ok(())
+    } else {
+        runtime.save(store)
+    }
+}
+
+/// Open the container behind `--store`, or explain that there is not one.
+fn container(store: &Path) -> Result<ContextStore, String> {
+    if !container_exists(store) {
+        return Err(format!(
+            "{} is not a .context container.\n\
+             Create one with: dcr ingest <path> --store {}",
+            store.display(),
+            store.display()
+        ));
+    }
+    ContextStore::open(store).map_err(|e| e.to_string())
 }
 
 /// A file, or every file under a directory — modification-time ordered.
@@ -179,7 +262,7 @@ fn run() -> Result<(), String> {
                     }
                 }
             }
-            runtime.save(&args.store).map_err(to_err)?;
+            persist(&runtime, &args.store).map_err(to_err)?;
             println!("\n{total} state nodes; store: {}", args.store.display());
         }
         "ask" => {
@@ -202,7 +285,7 @@ fn run() -> Result<(), String> {
             if args.flags.iter().any(|f| f == "--show-context") {
                 println!("\n{}", answer.context.render());
             }
-            runtime.save(&args.store).map_err(to_err)?;
+            persist(&runtime, &args.store).map_err(to_err)?;
         }
         "plan" => {
             let query = args.positional.first().ok_or("plan needs a query")?;
@@ -222,6 +305,67 @@ fn run() -> Result<(), String> {
             let runtime = open(&args.store, args.budget).map_err(to_err)?;
             print!("{}", runtime.report());
         }
+        "verify" => {
+            let store = container(&args.store)?;
+            let report = store.verify(None);
+            println!("{report}");
+            println!(
+                "\ngeneration {} · root {} · {}",
+                store.generation(),
+                store.root_hash().short(12),
+                if store.manifest().signing_key_id.is_some() {
+                    match store.manifest().signing_is_cryptographic {
+                        true => "signed",
+                        // Never let a development signature read as protection.
+                        false => "signed with a NON-CRYPTOGRAPHIC key",
+                    }
+                } else {
+                    "unsigned"
+                }
+            );
+            if !report.ok() {
+                return Err("verification failed".to_string());
+            }
+        }
+        "scrub" => {
+            let mut store = container(&args.store)?;
+            for replica in args.replicas.iter() {
+                store.add_replica(replica);
+            }
+            let options = if args.flags.iter().any(|f| f == "--repair") {
+                ScrubOptions::repairing(store.generation() + 1)
+            } else {
+                ScrubOptions::default()
+            };
+            let report = scrub(&mut store, &options, None).map_err(|e| e.to_string())?;
+            print!("{report}");
+            if !report.clean() {
+                return Err("scrub found unrepaired corruption".to_string());
+            }
+        }
+        "checkpoint" => {
+            let mut store = container(&args.store)?;
+            let checkpoint = store
+                .commit(store.generation() + 1, None)
+                .map_err(|e| e.to_string())?;
+            println!(
+                "generation {} · root {} · parent {} · {} objects",
+                checkpoint.generation,
+                checkpoint.merkle_root.short(12),
+                checkpoint.parent_root.short(12),
+                checkpoint.object_count
+            );
+        }
+        "quarantine" => {
+            let store = container(&args.store)?;
+            let entries = store.quarantined();
+            if entries.is_empty() {
+                println!("quarantine is empty");
+            }
+            for (id, reason) in entries {
+                println!("{} — {reason}", &id[..id.len().min(16)]);
+            }
+        }
         "demo" => {
             run_demo(args.budget).map_err(to_err)?;
         }
@@ -240,6 +384,12 @@ fn run() -> Result<(), String> {
                 run_coverage(&[100, 300, 1000, 3000], args.budget).map_err(to_err)?;
             } else if has("--poison") {
                 run_poison(args.budget).map_err(to_err)?;
+            } else if has("--baselines") {
+                run_baselines(args.turns, args.budget).map_err(to_err)?;
+            } else if has("--rebuild") {
+                run_rebuild(args.turns, args.budget).map_err(to_err)?;
+            } else if has("--tamper") {
+                run_tamper(args.budget).map_err(to_err)?;
             } else {
                 run_benchmark(args.turns, args.budget, args.window).map_err(to_err)?;
             }

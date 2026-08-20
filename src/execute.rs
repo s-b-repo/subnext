@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::graph::{DcrError, MemoryGraph};
 use crate::ids::digest;
-use crate::nodes::{Derivation, Kind, NewNode, Node, NodeMeta};
+use crate::nodes::{Derivation, Kind, NewNode, Node, NodeMeta, Origin};
 
 pub type Inputs = Vec<(String, f64)>;
 pub type DerivationFn = Box<dyn Fn(&Inputs) -> f64>;
@@ -141,6 +141,10 @@ impl ExecutionLayer {
     ) -> Result<Node, DcrError> {
         let value = self.call(graph, name, &inputs, &deps)?;
         let node = NewNode::new(Kind::Calculation, crate::ladder::format_number(value))
+            // Not read from anywhere — produced by running a derivation. The
+            // window labels it as such so a computed value is never mistaken
+            // for one the source material actually stated.
+            .origin(Origin::Computed)
             .deps(deps)
             .key(key.unwrap_or_else(|| name.to_string()))
             .meta(NodeMeta {

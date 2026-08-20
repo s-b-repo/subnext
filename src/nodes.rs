@@ -54,11 +54,78 @@ impl Kind {
     }
 }
 
+/// Where a node's content came from — its *epistemic origin*, which is
+/// orthogonal to [`Kind`] (what role it plays) and [`Status`] (whether it is
+/// still current).
+///
+/// The distinction exists so a reasoner is never handed a hypothesis dressed
+/// as an observation. `server.ip = 10.0.9.7` extracted from a log line and
+/// `server.ip = 10.0.9.7` guessed from two adjacent facts are the same string,
+/// the same kind and the same status; they are not the same claim, and only
+/// one of them should settle an argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum Origin {
+    /// Read directly out of material this runtime ingested.
+    #[default]
+    Observed,
+    /// Came from outside — another agent, a fetched document, a tool result.
+    ExternallySourced,
+    /// Produced by running a derivation over known inputs.
+    Computed,
+    /// Concluded by a model rather than read or computed.
+    Inferred,
+    /// Proposed, not established. Admissible for reasoning *about*, never as
+    /// grounds.
+    Hypothetical,
+}
+
+impl Origin {
+    pub const ALL: [Origin; 5] = [
+        Origin::Observed,
+        Origin::ExternallySourced,
+        Origin::Computed,
+        Origin::Inferred,
+        Origin::Hypothetical,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Origin::Observed => "observed",
+            Origin::ExternallySourced => "externally-sourced",
+            Origin::Computed => "computed",
+            Origin::Inferred => "inferred",
+            Origin::Hypothetical => "hypothetical",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Origin> {
+        Origin::ALL.into_iter().find(|o| o.as_str() == text)
+    }
+
+    /// Whether material of this origin may be cited as grounds.
+    ///
+    /// Observed, external and computed material can support a conclusion;
+    /// an inference or a hypothesis is a conclusion, and citing one as its own
+    /// evidence is how a guess becomes a fact.
+    pub fn is_grounds(self) -> bool {
+        matches!(
+            self,
+            Origin::Observed | Origin::ExternallySourced | Origin::Computed
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Fresh,
     Stale,
     Superseded,
+    /// Live, and in an unresolved disagreement with another live node. Both
+    /// sides are kept: the contradiction is the finding, not an error to
+    /// resolve by picking one.
+    Contradicted,
+    /// Live and open — an [`Kind::OpenQuestion`] nothing has answered yet.
+    Unresolved,
 }
 
 impl Status {
@@ -67,6 +134,8 @@ impl Status {
             Status::Fresh => "fresh",
             Status::Stale => "stale",
             Status::Superseded => "superseded",
+            Status::Contradicted => "contradicted",
+            Status::Unresolved => "unresolved",
         }
     }
 
@@ -75,8 +144,22 @@ impl Status {
             "fresh" => Some(Status::Fresh),
             "stale" => Some(Status::Stale),
             "superseded" => Some(Status::Superseded),
+            "contradicted" => Some(Status::Contradicted),
+            "unresolved" => Some(Status::Unresolved),
             _ => None,
         }
+    }
+
+    /// Current, and usable without revalidation.
+    ///
+    /// Contradicted and unresolved nodes are live: they enter the window
+    /// *carrying their marker*, because hiding a contradiction is worse than
+    /// showing one. Stale needs re-grounding first; superseded is history.
+    pub fn is_live(self) -> bool {
+        matches!(
+            self,
+            Status::Fresh | Status::Contradicted | Status::Unresolved
+        )
     }
 }
 
@@ -170,6 +253,9 @@ pub struct LevelCache {
 pub struct Node {
     pub id: String,
     pub kind: Kind,
+    /// Epistemic origin. Rendered whenever it is not `Observed`, so derived
+    /// material is never silently indistinguishable from read material.
+    pub origin: Origin,
     pub value: String,
     pub source_spans: Vec<String>,
     pub dependencies: Vec<String>,
@@ -235,6 +321,7 @@ impl Node {
 /// not one node overwriting the other.
 pub struct NewNode {
     pub kind: Kind,
+    pub origin: Origin,
     pub value: String,
     pub source_spans: Vec<String>,
     pub dependencies: Vec<String>,
@@ -247,6 +334,7 @@ impl NewNode {
     pub fn new(kind: Kind, value: impl Into<String>) -> Self {
         Self {
             kind,
+            origin: Origin::default(),
             value: value.into(),
             source_spans: Vec::new(),
             dependencies: Vec::new(),
@@ -286,6 +374,11 @@ impl NewNode {
         self
     }
 
+    pub fn origin(mut self, origin: Origin) -> Self {
+        self.origin = origin;
+        self
+    }
+
     pub fn build(self) -> Node {
         let id = make_id(
             self.kind.prefix(),
@@ -299,12 +392,17 @@ impl NewNode {
         Node {
             id,
             kind: self.kind,
+            origin: self.origin,
             value: self.value,
             source_spans: self.source_spans,
             dependencies: self.dependencies,
             confidence: self.confidence,
             timestamp: 0,
-            status: Status::Fresh,
+            status: if self.kind == Kind::OpenQuestion {
+                Status::Unresolved
+            } else {
+                Status::Fresh
+            },
             key: self.key,
             level_cache: RefCell::new(LevelCache::default()),
             meta: self.meta,

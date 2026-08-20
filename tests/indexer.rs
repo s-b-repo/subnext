@@ -179,13 +179,26 @@ fn out_of_order_material_cannot_revert_a_correction() {
 }
 
 #[test]
-fn resolved_contradictions_lose_the_warning() {
+fn a_resolved_contradiction_leaves_no_trace_of_the_old_value() {
     let mut rt = seeded();
     rt.ingest("Correction: the server ip is 10.0.9.7.", Some("t2"))
         .unwrap();
     let rendered = rt.plan("what is the server ip?", None).render();
+    // Resolved, so the adjudication warning goes away.
     assert!(!rendered.contains("CONTRADICTS="));
-    assert!(rendered.contains("superseded"));
+    // And the superseded value does not reach the window at all. It used to,
+    // annotated "source of a superseded fact; do not treat as current" — which
+    // is a guard only against a model that reads notes. On the adversarial
+    // mutation set the superseded sentence out-scores the correction on lexical
+    // overlap, so a matcher that ignores the note answered from it every time.
+    assert!(
+        !rendered.contains("10.0.4.12"),
+        "superseded value reached the window:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("10.0.9.7"),
+        "corrected value missing:\n{rendered}"
+    );
 }
 
 #[test]

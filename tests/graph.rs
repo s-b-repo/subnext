@@ -202,7 +202,29 @@ fn contradiction_keeps_both_sides() {
         f.graph.neighbors(a, Some(EdgeType::Contradicts), true),
         vec![b]
     );
-    assert_eq!(f.graph.node(a).status, Status::Fresh);
+    // Both sides stay live and both say so: a node in an open disagreement
+    // reports it in its own status rather than leaving a reader to notice the
+    // edge.
+    assert_eq!(f.graph.node(a).status, Status::Contradicted);
+    assert_eq!(f.graph.node(b).status, Status::Contradicted);
+    assert!(f.graph.node(a).status.is_live());
+}
+
+#[test]
+fn resolving_a_contradiction_settles_the_survivor() {
+    let mut f = fixture();
+    let old = f.claim("10.0.4.12", "server.ip", None);
+    let new = f.claim("10.0.9.7", "server.ip", None);
+    f.graph.contradict(old, new);
+    assert_eq!(f.graph.node(new).status, Status::Contradicted);
+
+    // Once the correction supersedes the old value nothing live disagrees with
+    // the survivor, so it must stop reading as contested — otherwise every
+    // correction leaves a permanent open dispute behind it.
+    f.graph.supersede(old, new);
+    assert_eq!(f.graph.node(old).status, Status::Superseded);
+    assert_eq!(f.graph.node(new).status, Status::Fresh);
+    assert!(f.graph.node(new).meta.contradicts.is_empty());
 }
 
 #[test]

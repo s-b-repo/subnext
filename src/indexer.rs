@@ -148,6 +148,29 @@ const CLAUSE_WORDS: &[&str] = &["and", "but"];
 /// Copulas that may sit inside a key phrase ("the error was: …").
 const COPULA_SEPARATORS: &[&str] = &["is", "was", "are", "were"];
 
+/// Multi-word separators that assign a new value to a subject the same way a
+/// copula does: `the datastore has moved to postgres-15`.
+///
+/// Corrections in the wild carry verbs, and a copula-only extractor silently
+/// drops most of them — it read "has moved to" as prose and produced no fact at
+/// all. Each phrase here has an unambiguous subject before it and its value
+/// after it, which is the same shape `=` and `is` already have. Phrasings whose
+/// subject follows the verb ("we switched X to Y") are deliberately NOT here:
+/// they need a different rule, and guessing at them would over-extract.
+const TRANSITION_SEPARATORS: &[&str] = &[
+    "has moved to",
+    "have moved to",
+    "has changed to",
+    "have changed to",
+    "was replaced by",
+    "were replaced by",
+    "is replaced by",
+    "was changed to",
+    "moved to",
+    "changed to",
+    "should be",
+];
+
 /// Deterministic, model-free node extraction.
 ///
 /// Deliberately conservative: it proposes state only for shapes that carry an
@@ -337,8 +360,25 @@ fn next_separator(text: &str, from: usize) -> Option<(usize, usize)> {
                 }
                 let word = text[start..end].to_lowercase();
                 let boundary = start == 0 || !is_word_char(bytes[start - 1] as char);
-                if boundary && COPULA_SEPARATORS.contains(&word.as_str()) {
-                    return Some((start, end));
+                if boundary {
+                    // Longest match first, so "was replaced by" is not read as
+                    // the copula "was" with "replaced by ..." as its value.
+                    for phrase in TRANSITION_SEPARATORS {
+                        let stop = start + phrase.len();
+                        if stop <= text.len()
+                            && text.is_char_boundary(stop)
+                            && text[start..stop].eq_ignore_ascii_case(phrase)
+                            && text
+                                .as_bytes()
+                                .get(stop)
+                                .is_none_or(|b| !is_word_char(*b as char))
+                        {
+                            return Some((start, stop));
+                        }
+                    }
+                    if COPULA_SEPARATORS.contains(&word.as_str()) {
+                        return Some((start, end));
+                    }
                 }
                 i = end;
                 continue;
