@@ -213,9 +213,9 @@ P=(  # API hygiene
 # Whole-file (multi-line) patterns: a real struct definition never fits on one
 # line, so these MUST NOT be matched line-by-line.
 P_ML=(
-    '#\[derive\([^)]*\bDebug\b[^)]*\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?struct\s+\w+\s*\{[^}]*\b[Pp]assword'
-    '#\[derive\([^)]*\bDebug\b[^)]*\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?struct\s+\w+\s*\{[^}]*\b[Ss]ecret'
-    '#\[derive\([^)]*\bDebug\b[^)]*\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?struct\s+\w+\s*\{[^}]*\b[Tt]oken'
+    '#\[derive\([^)]*\bDebug\b[^)]*\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?struct\s+\w+\s*\{[^}]*(?<![A-Za-z])[Pp]assword'
+    '#\[derive\([^)]*\bDebug\b[^)]*\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?struct\s+\w+\s*\{[^}]*(?<![A-Za-z])[Ss]ecret'
+    '#\[derive\([^)]*\bDebug\b[^)]*\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?struct\s+\w+\s*\{[^}]*(?<![A-Za-z])[Tt]oken'
 )
 
 declare -A SECTION_DESC=(

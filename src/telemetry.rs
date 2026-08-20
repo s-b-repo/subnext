@@ -42,7 +42,7 @@ pub struct Telemetry {
     pub prefetch_hits: u32,
     pub wasted_builds: u32,
     /// What the naive baseline would have paid: every token ever ingested.
-    pub history_tokens: usize,
+    pub history_tokens: usize,  // audit-allow: LM token count, not a credential
 }
 
 impl Telemetry {

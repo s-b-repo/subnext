@@ -64,17 +64,17 @@ synchronous, still a deliberately offline library. Object writes go through
 `write_atomic` (temp file plus rename), which is the property that matters here:
 a partial write must never be mistakable for a whole object.
 
-**P — `Debug` over a struct containing a token (6).** Section P was dead until
-the tool was fixed: three of its four regexes never matched anything. The live
-one looks for a struct that derives `Debug` and holds a field whose name
-contains `token` — a credential printed by `{:?}`.
+**P — `Debug` over a struct holding a credential field (7).** Section P was dead
+until the tool was fixed: three of its four regexes never matched anything. The
+live ones look for a struct that derives `Debug` and holds a field named for a
+credential — `secret`, `token` or `password` — a value printed by `{:?}`.
 
-All six are token *counts*, not secrets — `Allocation` (`budget.rs:82`),
+All seven are token *counts*, not secrets — `Allocation` (`budget.rs:82`),
 `ActiveContext` (`planner.rs:170`), `Answer` (`runtime.rs:39`), `RebuildReport`
-(`runtime.rs:1137`), `Turn` (`telemetry.rs:15`) and `Report`
-(`telemetry.rs:105`). This crate counts tokens in the language-model sense on
-nearly every struct that crosses the planner, so rather than carry six
-permanent false positives, each is waived in `src/` by
+(`runtime.rs:1137`), `Turn` (`telemetry.rs:15`), `Report` (`telemetry.rs:105`)
+and `Telemetry` (`telemetry.rs:29`). This crate counts tokens in the
+language-model sense on nearly every struct that crosses the planner, so rather
+than carry seven permanent false positives, each is waived in `src/` by
 `// audit-allow: LM token count, not a credential` on the count field, and
 section P is now gated in CI (see Gating): it reports zero today and fails the
 build the moment a *new* struct derives `Debug` over a credential-named field.
@@ -177,27 +177,36 @@ examined nothing.
 
 ## Gating
 
-Section P is wired into CI as of `.github/workflows/audit.yml`:
+Section P is wired into CI as `.github/workflows/audit.yml`, which runs
+`scripts/audit-selftest.sh` on any push or PR touching `src/`, the script, or
+the workflow. That script is the gate plus a proof the gate works:
 
-    scripts/audit-bad-patterns.sh --strict --section P --strict-sections P
+1. **Gate.** `--strict --section P --strict-sections P` fails the build on a
+   section-P hit. This is the one section narrow enough to gate: a single live
+   regex, it caught a real leaked signing key the first time it ran, and its six
+   token-*count* false positives are waived in-src by name
+   (`// audit-allow: LM token count, not a credential`) rather than by
+   suppressing the section — so it is green today and fires the moment a *new*
+   struct derives `Debug` over a credential-named field.
+2. **Firing proof.** The script plants a `Debug`-over-`secret` fixture
+   (`scripts/audit-selftest/leaky_signer.rs`, outside `src/` so it is never
+   compiled or scanned by the gate) and fails if the audit does *not* catch it.
+   A gate that only ever passes is indistinguishable from one whose regex has
+   rotted — section P was dead once — so every run re-proves it can fire.
 
-It runs on any push or PR touching `src/`, the script, or the workflow, and
-fails the build on a section-P hit. This is the one section narrow enough to
-gate: a single live regex, it caught a real leaked signing key the first time it
-ran, and its six token-*count* false positives are waived in-src by name
-(`// audit-allow: LM token count, not a credential`) rather than by suppressing
-the section — so the gate is green today and fires the moment a *new* struct
-derives `Debug` over a credential-named field.
-
-What it does **not** catch, stated so the gate is not trusted past its reach:
-the regex anchors `secret`/`token`/`password` on a word boundary, so a compound
-field name like `access_token` or `client_secret` slips through. The crate has
-no such field today; a reviewer adding one must not assume this gate will stop
-it. Broadening the pattern was considered and declined — it would flag
-`signing_key` (a `KeyId` reference, not key material) and the crate's pervasive
-node-`key` fields, trading a real blind spot for a flood of waivers.
+What the gate covers, and where it stops. The three live regexes match a
+`secret` / `token` / `password` field anywhere in the struct, compound names
+included — `access_token`, `client_secret`, `db_password`, `signing_secret` all
+fire. That required admitting an underscore before the keyword
+(`(?<![A-Za-z])`, not `\b`, which does not fire after `_`); without it the gate
+would have caught `InsecureDevSigner` only because its field was the bare name
+`secret`, and missed it under the name it should have had. The gate deliberately
+does **not** cover `key`, `credential`, `passwd` or `apikey`: `key` is pervasive
+here (`key: Option<String>` on graph nodes) and would be waived into
+uselessness, and a gate mostly of waivers is worse than none — it turns a real
+signal into noise people learn to skip. A reviewer naming a field `credential`
+or `apikey` must not assume this gate stops it.
 
 The rest of the matrix stays informational: a `--strict` over every section
-would require waiving every accepted line above, and a gate that is mostly
-waivers tests nothing. Re-run the audit after any change to `src/` and add a row
-here for anything new.
+would require waiving every accepted line above. Re-run the audit after any
+change to `src/` and add a row here for anything new.
