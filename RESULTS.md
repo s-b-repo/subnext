@@ -255,10 +255,22 @@ committed while fixing an instance of it — which is why the procedure above is
 written out rather than summarised.
 
 All four were found by someone else asking a differently-shaped question about
-something already checked. **Not one came from re-running an existing check more
-carefully.** That is worth knowing before trusting the remaining controls: the
-method that found four is cross-review, and this repository has no mechanism
-that supplies it on demand.
+something already checked, rather than by anyone re-running an existing check
+more carefully. It is tempting to conclude from that "cross-review, not
+tooling", and a fifth instance — in the editing script used to write this very
+finding, which called `str.replace` without checking the pattern matched and so
+produced a successful-looking run against an unchanged file — is the
+counter-example. **Tooling found that one, because the retry failed loudly.**
+
+So the narrower and more useful claim: tooling finds these exactly when it is
+built to fail noisily, and most tooling is not. Of the five, two would have been
+caught by that discipline alone — the compiled-out assertion and the silent
+`replace` — and a third, the unexercisable metric, by its close relative of
+running a control in the configuration where it must fire. The remaining two
+needed someone to ask a different question.
+
+"Find another reviewer" is expensive and often unavailable. **"Make your checks
+fail loudly" is available this afternoon**, and it covers most of this list.
 
 A narrow lint — no debug assertions in paths that only ever run under
 `--release` — would have caught the third when it was written; `src/` currently
