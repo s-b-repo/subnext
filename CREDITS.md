@@ -133,6 +133,21 @@ attempt **failed loudly**. Assertion is what converts a same-shaped check into a
 useful one. The accurate claim is narrower — tooling finds these exactly when it
 is built to fail noisily, and most of it is not.
 
+A second overstatement, corrected the same way. Four of the five were caught by
+somebody other than their author, which is a strong enough pattern that it is
+tempting to conclude a second *reader* is required and that care cannot
+substitute. That is wrong by count: four defects across the day were self-caught,
+including one of the five. What is uniform is not who did the catching but the
+*instrument* — a tool failing loudly on a retry, a re-measurement, a count, a
+comparison of two artefacts. **Re-reading a claim caught nothing, for anyone, at
+any point today.**
+
+So the requirement is a second instrument rather than a second pair of eyes.
+Another person is one instrument and the most reliable one available; re-running,
+re-measuring and counting are others, and an author working alone has those for
+free. "You need a reviewer" is frequently unactionable. "You need a reading that
+does not come from the same instrument as the first" never is.
+
 Applied to the five, loud-failure discipline covers two outright (the
 compiled-out assertion, the silent `str.replace`) and one partially — the
 unexercisable stale-fact metric, reachable not by loudness but by running a
