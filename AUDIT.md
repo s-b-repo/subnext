@@ -61,6 +61,13 @@ synchronous, still a deliberately offline library. Object writes go through
 `write_atomic` (temp file plus rename), which is the property that matters here:
 a partial write must never be mistakable for a whole object.
 
+**J — `tokens: usize` matched as a secret.** The matrix's `[Tt]oken` pattern
+looks for credentials in source; every token *count* field in this crate trips
+it. There is no secret anywhere in `src/` — the only secret-shaped value is
+`InsecureDevSigner`'s test key, which is now redacted in its `Debug` output
+after review found the derive would have printed it. That was a genuine finding
+from this matrix and the one real bug it has produced.
+
 **B — `let _ = …` (11 → 14).** The new ones discard the result of removing a
 sidecar during quarantine and of cleaning a scratch directory in the tamper
 probe. In both, failure means a leftover file rather than a wrong result.
