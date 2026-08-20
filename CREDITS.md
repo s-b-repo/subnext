@@ -77,9 +77,26 @@ surfaced it. The receipt now carries a guard-fired column — 4/4 full runtime,
 
 **Landed.** `1ff91f6`, `c17abf5`.
 
-**Disputed / open.** Policy version is not in the receipt. Their point that a
-pass can be correct through an unobserved shortcut is answered for the
-supersession guard and not in general.
+**Fourth claim changed, indirectly.** Their general form — a pass can be correct
+through an unobserved shortcut and look indistinguishable from the mechanism
+under test — turned out to describe a defect one level up, in the checking code
+rather than the runtime. Table 4's claim that the exact and approximate
+retrieval paths agree rested on a `debug_assert_eq!`, and every benchmark here
+runs `--release`, where debug assertions are compiled out. The check read as
+correct and never executed in the command that produced the table.
+
+Counting the reviewer's original argument about `stale_fact_read_rate`, the
+phantom node behind `edge shown`, and this, the same defect has now been found
+three times in this repository: a control wired so that it cannot fail, placed
+inside the result it guards. It is the failure this project is least able to see
+on its own, because in every case the artefact looks exactly like a working one.
+
+**Landed.** `3821cc5`, `7a89511`.
+
+**Disputed / open.** Policy version is not in the receipt. Their point is
+answered for the supersession guard and for the ANN equality check, not in
+general — nothing systematically audits this codebase for assertions that cannot
+fire, and the two found so far were found by argument rather than by tooling.
 
 ---
 
