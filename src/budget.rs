@@ -82,7 +82,7 @@ impl Candidate {
 #[derive(Debug, Default, Clone)]
 pub struct Allocation {
     pub chosen: HashMap<NodeIdx, Choice>,
-    pub tokens: usize,
+    pub tokens: usize,  // audit-allow: LM token count, not a credential
     pub utility: f32,
     pub budget: usize,
     pub dropped: Vec<NodeIdx>,

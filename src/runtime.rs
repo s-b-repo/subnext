@@ -42,7 +42,7 @@ pub struct Answer {
     pub context: ActiveContext,
     pub escalations: u32,
     pub cited: Vec<String>,
-    pub tokens: usize,
+    pub tokens: usize,  // audit-allow: LM token count, not a credential
     /// True when a mid-turn invalidation forced the workspace to be rebuilt.
     pub replanned: bool,
 }
@@ -1140,7 +1140,7 @@ pub struct RebuildReport {
     pub rebuilt_l1: usize,
     pub rebuilt_l2: usize,
     pub rebuilt_l3: usize,
-    pub tokens: usize,
+    pub tokens: usize,  // audit-allow: LM token count, not a credential
     pub nodes: usize,
 }
 

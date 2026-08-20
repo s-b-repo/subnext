@@ -73,8 +73,12 @@ All six are token *counts*, not secrets — `Allocation` (`budget.rs:82`),
 `ActiveContext` (`planner.rs:170`), `Answer` (`runtime.rs:39`), `RebuildReport`
 (`runtime.rs:1137`), `Turn` (`telemetry.rs:15`) and `Report`
 (`telemetry.rs:105`). This crate counts tokens in the language-model sense on
-nearly every struct that crosses the planner, so the pattern will keep firing
-here and the count will rise rather than fall. Confirm the list with
+nearly every struct that crosses the planner, so rather than carry six
+permanent false positives, each is waived in `src/` by
+`// audit-allow: LM token count, not a credential` on the count field, and
+section P is now gated in CI (see Gating): it reports zero today and fails the
+build the moment a *new* struct derives `Debug` over a credential-named field.
+Confirm the list with
 `scripts/audit-bad-patterns.sh --section P --show` rather than by grepping for
 token-named fields: more structs have one than the section reports, because the
 pattern requires the field to sit inside the struct that derives `Debug`.
@@ -173,8 +177,27 @@ examined nothing.
 
 ## Gating
 
-`--strict` is **not** wired into CI, because a green result would require
-waiving every accepted line above, and a gate that is mostly waivers tests
-nothing. The useful invariant — no unreviewed panics in library code — is held
-by library code being empty of panicking forms and by this file existing.
-Re-run the audit after any change to `src/` and add a row here for anything new.
+Section P is wired into CI as of `.github/workflows/audit.yml`:
+
+    scripts/audit-bad-patterns.sh --strict --section P --strict-sections P
+
+It runs on any push or PR touching `src/`, the script, or the workflow, and
+fails the build on a section-P hit. This is the one section narrow enough to
+gate: a single live regex, it caught a real leaked signing key the first time it
+ran, and its six token-*count* false positives are waived in-src by name
+(`// audit-allow: LM token count, not a credential`) rather than by suppressing
+the section — so the gate is green today and fires the moment a *new* struct
+derives `Debug` over a credential-named field.
+
+What it does **not** catch, stated so the gate is not trusted past its reach:
+the regex anchors `secret`/`token`/`password` on a word boundary, so a compound
+field name like `access_token` or `client_secret` slips through. The crate has
+no such field today; a reviewer adding one must not assume this gate will stop
+it. Broadening the pattern was considered and declined — it would flag
+`signing_key` (a `KeyId` reference, not key material) and the crate's pervasive
+node-`key` fields, trading a real blind spot for a flood of waivers.
+
+The rest of the matrix stays informational: a `--strict` over every section
+would require waiving every accepted line above, and a gate that is mostly
+waivers tests nothing. Re-run the audit after any change to `src/` and add a row
+here for anything new.

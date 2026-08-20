@@ -16,7 +16,7 @@ use crate::policy::QueryType;
 pub struct Turn {
     pub query: String,
     pub qtype: QueryType,
-    pub tokens: usize,
+    pub tokens: usize,  // audit-allow: LM token count, not a credential
     pub budget: usize,
     pub admitted: usize,
     pub considered: usize,
@@ -107,12 +107,12 @@ pub struct Report {
     pub turns: usize,
     pub escalation_rate: Option<f64>,
     pub stale_fact_read_rate: Option<f64>,
-    pub tokens_per_query_mean: f64,
-    pub tokens_per_query_max: usize,
+    pub tokens_per_query_mean: f64,  // audit-allow: LM token count, not a credential
+    pub tokens_per_query_max: usize,  // audit-allow: LM token count, not a credential
     pub budget_overflows: usize,
     pub demotions: usize,
     pub audit_path_completeness: Option<f64>,
-    pub history_tokens: usize,
+    pub history_tokens: usize,  // audit-allow: LM token count, not a credential
     pub compression_ratio: Option<f64>,
     /// `None` until speculation has issued a prefetch: a rate over zero
     /// attempts is not zero, it is undefined, and printing 0.000 would read as

@@ -173,7 +173,7 @@ pub struct ActiveContext {
     pub qtype: Option<QueryType>,
     pub budget: usize,
     pub entries: Vec<Admission>,
-    pub tokens: usize,
+    pub tokens: usize,  // audit-allow: LM token count, not a credential
     pub seeds: Vec<NodeIdx>,
     pub dropped: Vec<NodeIdx>,
     pub demoted: Vec<(NodeIdx, Level, Level)>,
