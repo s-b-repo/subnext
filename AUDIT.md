@@ -167,13 +167,37 @@ lines, 311 raw matches, 106 in gating sections, across 30 files and 13,539
 lines. A number here has two rulers — the code and the matrix. Section P was
 later widened to catch compound credential names, so re-running today's tool at
 `3821cc5` will not reproduce 274; pin both axes or the figure is not
-reproducible, and a bare "current" rots the moment any of the three of us push. Unchanged from the `c17abf5` baseline except
-that one pattern stopped matching: the crate's only `debug_assert_eq!` became a
-real `assert_eq!`, because it guarded Table 4's correctness-equality claim and
-every benchmark runs `--release`, where debug assertions are compiled out. It
-was a control that could not fire, sitting inside the table that reported the
-result it was meant to guard — the third instance of that defect this suite has
-caught.
+reproducible, and a bare "current" rots the moment any of the three of us push.
+
+That snapshot was unchanged from the `c17abf5` baseline except for one pattern
+that stopped matching: the crate's only `debug_assert_eq!` became a real
+`assert_eq!`, because it guarded Table 4's correctness-equality claim and every
+benchmark runs `--release`, where debug assertions are compiled out. It was a
+control that could not fire, sitting inside the table that reported the result
+it was meant to guard — the third instance of that defect this suite has caught.
+
+### Latest snapshot: code `8b7162f`, post-broadening tool
+
+**270 distinct hit lines, 308 raw matches, 106 in gating sections, section P at
+0, across 30 files and 13,721 lines.**
+
+Both rulers moved between that and the row above it, in opposite directions and
+for unrelated reasons, which is the case the two-axis rule exists for:
+
+- *the tool* widened section P to compound credential names, taking P to 0 via
+  in-src waivers. Two counts get confused here, so both are stated: **seven**
+  section-P hits (struct-level, verified by stripping every waiver and
+  re-running), suppressed by **nine** `// audit-allow:` comment lines, because
+  waiving is per-line and three of the structs hold more than one token-named
+  field. Neither number is the other;
+- *the code* grew `build_corpus_diverse`, whose numeric casts added two lines
+  and three matches to section E. That is the entire 268 → 270 delta, and it is
+  why a figure handed between sessions without a revision was falsified by a
+  third party committing in the gap.
+
+Nothing in the delta touches a gating section. The gate has been green
+throughout and is verified green at this revision by an independent run rather
+than by the CI badge alone.
 
 A tool that silently passes on an empty directory is worth more scrutiny than
 the code it audits — it had been reporting success for a case where it had
