@@ -1,7 +1,7 @@
 <section class="abstract">
 <h2>Abstract</h2>
 <p>Language models degrade as irrelevant, stale, and superseded material accumulates in their context — a failure commonly called <em>context rot</em>. Enlarging the context window does not remove it: attention cost grows quadratically, mid-context material is used unreliably, and a corrected fact does not stop competing with the value it replaced. We describe the <strong>Dynamic Context Runtime</strong> (DCR), a system that separates <em>unbounded history</em> from <em>bounded attention</em>. History is stored as immutable, addressable spans and compiled into a typed dependency graph of facts, decisions, and derivations, each bound to the spans that ground it. Each turn, a planner assembles a small working set by solving a multiple-choice knapsack over (node, representation-level) pairs under an explicit token budget, so the model never sees the transcript — only the cheapest sufficient representation of what the current question needs.</p>
-<p>We give a zero-dependency Rust reference implementation (13,288 lines in <code>src/</code>) that enforces the design's invariants in code rather than in prose: unsourced facts are rejected at insertion, nothing is deleted, and no stale node reaches the model. We evaluate it with a deliberately non-neural instrument — a deterministic line-matching reasoner shared by all conditions — which isolates the quality of <em>context assembly</em> from the quality of the model. On a 300-turn synthetic incident transcript (27,362 tokens), DCR answers all seven probes using 462 tokens per query on average, 59× less attention than the full history, and answers all seven from a 200-token budget. Across a 33× growth in history (8.5k → 283k tokens) the working set stays flat at ~410 tokens with no loss of correctness. An ablation identifies which mechanisms carry which probes — and reports two that carry nothing on this corpus. A positive control turns the runtime's stale-fact metric from a zero that could not fire into a measured guard, and a read-coverage metric — the offline dual of audit completeness — shows the fraction of history the model ever actually sees collapsing toward zero as history grows: the blind region, not the working set, is what grows with <span class="m">N</span>. We state plainly what the evaluation cannot show: it is a synthetic corpus, the instrument is not a language model, and we do not compare against a recursive-language-model implementation.</p>
+<p>We give a zero-dependency Rust reference implementation (13,288 lines in <code>src/</code>) that enforces the design's invariants in code rather than in prose: unsourced facts are rejected at insertion, nothing is deleted, and no stale node reaches the model. We evaluate it with a deliberately non-neural instrument — a deterministic line-matching reasoner shared by all conditions — which isolates the quality of <em>context assembly</em> from the quality of the model. On a 300-turn synthetic incident transcript (27,362 tokens), DCR answers all seven probes using 462 tokens per query on average, 59× less attention than the full history, and answers all seven from a 200-token budget. Across a 33× growth in history (8.5k → 283k tokens) the working set stays flat at ~410 tokens with no loss of correctness. An ablation identifies which mechanisms carry which probes — and reports two that carry nothing on this corpus. A positive control turns the runtime's stale-fact metric from a zero that could not fire into a measured guard, and a read-coverage metric — the offline dual of audit completeness — shows the fraction of history the model ever actually sees collapsing toward zero as history grows: the blind region, not the working set, is what grows with <span class="m">N</span>. Because durable memory is only auditable if it can prove it returned what it stored, context is held in a content-addressed, append-only container under a Merkle root, with chained generations and anti-rollback; an adversarial probe confirms that object corruption, checkpoint rewriting, and rollback are each detected, and we state precisely where the guarantee stops — tamper-evident, not tamper-proof. Against a second corpus built so that similarity is misleading and refusing is sometimes correct, <strong>DCR scores 2/5 and loses to recursive map-reduce</strong>; we report the three failures, since a benchmark incapable of showing the system losing is not evidence. We state plainly what the evaluation cannot show: it is a synthetic corpus, the instrument is not a language model, and we do not compare against a recursive-language-model implementation.</p>
 </section>
 
 <h2 id="s1">1&ensp;Introduction</h2>
@@ -107,7 +107,7 @@ FIGURE_ARCH
 
 <h2 id="s4">4&ensp;Implementation</h2>
 
-<p>The reference implementation is 13,288 lines of Rust in <code>src/</code> (edition 2024), plus roughly 3,000 lines of tests, with <strong>no external crates</strong>. Hashing, text scanning, JSON persistence, and argument parsing are all in-tree. This is a deliberate choice for a specification's reference implementation: a reader can audit every line that stands between the design and the measurement, and the build has no supply chain. A consequence worth stating is that the extractor is a hand-written scanner rather than a regular-expression engine — which turned out to read better as a parser than the pattern it replaced.</p>
+<p>The reference implementation is 13,288 lines of Rust in <code>src/</code> (edition 2024), plus roughly 3,000 lines of tests, with <strong>no external crates</strong>. Hashing, text scanning, JSON persistence, and argument parsing are all in-tree. The durability layer of §3.9 carries that rule to its honest limit: SHA-256 is implemented in-tree and checked against the published FIPS&nbsp;180-4 vectors, because a hash is the one cryptographic primitive that can be verified against known output. Signatures and authenticated encryption are traits with <em>no bundled implementation</em> — hand-rolling Ed25519 or an AEAD, where the failure modes are constant-time behaviour and nonce discipline rather than a wrong digest, would trade a dependency for a liability. A store therefore records honestly that it is unsigned rather than implying protection it does not have. This is a deliberate choice for a specification's reference implementation: a reader can audit every line that stands between the design and the measurement, and the build has no supply chain. A consequence worth stating is that the extractor is a hand-written scanner rather than a regular-expression engine — which turned out to read better as a parser than the pattern it replaced.</p>
 
 <table class="small">
 <caption><strong>Table 1.</strong> Module map. Each design element has one home.</caption>
@@ -274,6 +274,72 @@ FIGURE_SCALE
 </table>
 <p>The count of spans ever shown is flat — six to ten — while history grows thirty-fold, so coverage collapses from 9.9% to 0.2% and the unread region grows linearly with <span class="m">N</span>. This is the dual cost of bounded attention, and it is exactly what the probe table in §5.4 cannot express: the runtime answers from compact facts without ever surfacing most of the history's content, so a span whose specifics silently governed an answer can never be caught by a probe. Storage grows <span class="m">O(N)</span>; read coverage does not — the blind region does. Whether that region can be audited without replaying it — for instance by flagging never-covered spans whose facts feed admitted decisions — is left open (§7).</p>
 
+<h3>5.11&ensp;Result 5 — a corpus built to make DCR lose</h3>
+
+<p>Every result so far comes from one corpus, and that corpus is kind to us. Its probes ask for material that similarity can find, which is why a plain top-k retriever does as well on it as full context. Table 9 makes that concrete: RAG over the same hybrid index answers 5/7, exactly matching the full-context baseline, at roughly 2.5× DCR's token cost. DCR's 7/7 comes from two probes specifically — a fact stated once and never repeated, where there is nothing for similarity to latch onto, and an exact quote, where top-k returns the right chunk but not the right bytes. That is a narrower claim than "7/7 versus 5/7" suggests, and stating it narrowly is the point.</p>
+
+<table class="figure-wide">
+<caption><strong>Table 9.</strong> Against baselines that retrieve rather than truncate. Same corpus, same reasoner, <span class="m">B</span> = 1,200. Recursive is charged for every chunk it reads.</caption>
+<thead><tr><th>Probe</th><th class="c">full</th><th class="c">RAG</th><th class="c">summarise-all</th><th class="c">recursive</th><th class="c">DCR</th></tr></thead>
+<tbody>
+<tr><td>corrected fact (mid-history)</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="c ok">ok</td></tr>
+<tr><td>corrected fact (late)</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="c miss">miss</td><td class="c miss">miss</td><td class="c ok">ok</td></tr>
+<tr><td>old fact, never repeated</td><td class="c miss">miss</td><td class="c miss">miss</td><td class="c miss">miss</td><td class="c miss">miss</td><td class="c ok">ok</td></tr>
+<tr><td>exact quote</td><td class="c miss">miss</td><td class="c miss">miss</td><td class="c miss">miss</td><td class="c miss">miss</td><td class="c ok">ok</td></tr>
+<tr><td>justification</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="c ok">ok</td></tr>
+<tr><td>detail buried in a long span</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="c ok">ok</td></tr>
+<tr><td>corrected fact (very late)</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="c ok">ok</td></tr>
+<tr class="total"><td>correct</td><td class="c">5 / 7</td><td class="c">5 / 7</td><td class="c">1 / 7</td><td class="c">4 / 7</td><td class="c">7 / 7</td></tr>
+<tr class="total"><td>mean tokens per query</td><td class="c">27,362</td><td class="c">1,168</td><td class="c">1,197</td><td class="c">31,074</td><td class="c">462</td></tr>
+</tbody>
+</table>
+
+<p>Two of those columns are informative beyond the score. Summarising everything and truncating to the same budget collapses to 1/7: uniform compression destroys precisely the details the probes ask for, which is the strongest evidence here that <em>selective</em> representation is doing work that compression alone cannot. Recursive map-reduce costs more than full context — 31,074 tokens against 27,362 — because it reads every chunk and then reads its own digest. Unlimited coverage is not free, and charging honestly for it is what makes the comparison meaningful.</p>
+
+<p>A benchmark that only rewards recall also rewards answering confidently at all times, which is the failure this architecture exists to avoid. Table 10 uses a second corpus built on the opposite principle: similarity is actively misleading, and two of the five probes are passed by <em>declining</em>. Multi-hop probes are scored on the assembled context rather than the answer, uniformly across every column, because the deterministic reasoner is a line matcher and cannot perform a join; scoring its output there would measure the stand-in model rather than the assembly.</p>
+
+<table class="figure-wide">
+<caption><strong>Table 10.</strong> The discriminating corpus. Refusal probes are passed by <em>not</em> answering. DCR does not win this table.</caption>
+<thead><tr><th>Probe</th><th class="c">full</th><th class="c">RAG</th><th class="c">summarise-all</th><th class="c">recursive</th><th class="c">DCR</th></tr></thead>
+<tbody>
+<tr><td>lexical decoy on a stale fact</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="c ok">ok</td></tr>
+<tr><td>three-hop dependency (context)</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="c ok">ok</td></tr>
+<tr><td>stale derivation (must refuse)</td><td class="c miss">miss</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="c miss">miss</td></tr>
+<tr><td>absent fact (must refuse)</td><td class="c miss">miss</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="c miss">miss</td><td class="c miss">miss</td></tr>
+<tr><td>contested fact (order decides)</td><td class="c miss">miss</td><td class="c miss">miss</td><td class="c miss">miss</td><td class="c miss">miss</td><td class="c miss">miss</td></tr>
+<tr class="total"><td>correct</td><td class="c">2 / 5</td><td class="c">2 / 5</td><td class="c">2 / 5</td><td class="c">3 / 5</td><td class="c">2 / 5</td></tr>
+<tr class="total"><td>mean tokens per query</td><td class="c">27,382</td><td class="c">1,133</td><td class="c">1,180</td><td class="c">31,180</td><td class="c">237</td></tr>
+</tbody>
+</table>
+
+<p><strong>DCR scores 2/5 and loses to recursive map-reduce.</strong> The three failures are the most useful output the evaluation has produced, and each names a real limit rather than a tuning problem.</p>
+
+<p><em>Stale derivation.</em> A figure that arrives as prose — <em>"the incident cost estimate is 2,160 USD, computed from the engineer count, the incident hours and the hourly rate"</em> — is served unchanged after the hourly rate is corrected. Invalidation propagates along dependency edges, and a number stated in text has none: the runtime only tracks derivations it computed itself. The fix is not obvious, because parsing "computed from X, Y and Z" into real edges would extend extraction into inference, which is exactly where wrong facts get cached with high confidence.</p>
+
+<p><em>Absent fact.</em> Asked for a value the history never states, DCR serves the adjacent line, where full context and RAG both decline because their raw text scores below the reasoner's threshold. This is the cost of assembling eagerly: a window pre-filled with <em>selected</em> facts makes whatever is nearest look good. It is the mirror image of the failure §5.10 addresses — fluent because nothing in the query revealed that the answer was missing.</p>
+
+<p><em>Contested fact.</em> Two claims on one key disagree, neither is phrased as a correction, and the later silently supersedes the earlier with no marker reaching the window. This is documented behaviour, not a defect: ingest order is event order, and treating every plain restatement as a live contradiction would flood the window with disputes that are not disputes. But the cost is real and this row prices it — merge two transcripts and merge order decides what is true, silently.</p>
+
+<p>One probe is worth reporting as a success for a different reason. The lexical decoy puts the query's exact words four times in the superseded document and once in the correction, so a system riding on retrieval attraction rather than the supersession edge answers with the stale value. DCR serves the correction, which is direct evidence that supersession is load-bearing rather than incidental.</p>
+
+<p>Designing this corpus produced a methodological finding worth passing on. Three of the five probes initially failed for every condition, and for an uninteresting reason: their vocabulary collided with the filler text, so the probes measured the collision rather than the property they named. A probe that fails because the benchmark is broken is indistinguishable, in the table, from a probe that fails because the system is. Only inspecting the assembled window per probe separated them.</p>
+
+<h3>5.12&ensp;Result 6 — what rebuilding the workspace costs</h3>
+
+<p>Section 3.1 claims the working set can be destroyed and rebuilt from durable memory at any time. That is only a guarantee if rebuilding is cheap; if reconstruction requires re-deriving state, the invariant is nominal — true in principle, never exercised, and quietly false in the only situation where it matters. Rebuilding is one planning pass, not a replay: drop every cached representation, then classify, seed, expand, level-assign, solve, and materialise only what was admitted. The cost is therefore bounded by the working set rather than by history.</p>
+
+<p>Measured over the seven probes at <span class="m">B</span> = 1,200, a cold rebuild — every cached representation dropped, the window reassembled from raw spans alone — costs <strong>1.54 ms on average against 0.15 ms warm</strong>. The gap tracks how much L1 has to be rebuilt: probes that admit only cached facts rebuild nothing and cost the same either way, while the probe that pulls long spans rebuilds 21 summaries and takes 5.1 ms, dominating the mean. At three orders of magnitude below a single model call, discarding the workspace between turns is a real option rather than a theoretical one.</p>
+
+<p>The number does not license a stronger claim. Rebuild has two terms, and only one is bounded: materialisation is capped by the attention budget, while retrieval is not (§5.5). The measurement should be read as "bounded by the working set, plus a retrieval term that is only now becoming sub-linear."</p>
+
+<h3>5.13&ensp;Result 7 — can the container detect tampering?</h3>
+
+<p>A security property that cannot fail a test is not a property, it is a claim. The durability layer of §3.9 is therefore exercised adversarially: corrupt a stored object, rewrite a historical checkpoint, and attempt a rollback to an older internally-consistent state. All three are detected — the first by the content address, the second by the chain, the third by the generation high-water mark — and a corrupted object additionally causes the runtime to refuse to load rather than to load partially, on the grounds that a memory with invisible gaps is worse than one that will not open.</p>
+
+<p>The probe earned its place immediately. Its first run passed the rewritten-checkpoint case, because the chain digest covered only the Merkle root and the delta, leaving the timestamp, the object count and the policy hash editable without breaking anything. The chain now covers the whole checkpoint body. A later, exhaustive version of the same idea — mutate <em>every</em> field in turn and require each to break the chain — found a further gap that the single-case regression test could not have: the schema field was reconstructed from a constant when the digest was recomputed, so whatever was on disk never entered it.</p>
+
+<p>What the result does not show is the case §3.9 already conceded: an attacker who rewrites objects, chain, manifest and high-water mark together produces a store that verifies. These three cases measure evidence of tampering, and nothing here measures resistance to it.</p>
+
 <h2 id="s6">6&ensp;Threats to validity</h2>
 
 <p>We state these plainly because the results above are easy to over-read.</p>
@@ -284,7 +350,11 @@ FIGURE_SCALE
 
 <p><strong>No RLM comparison.</strong> We motivate the design as a layer above recursive slicing of context, but we do not implement or measure against a recursive-language-model system. Any claim that DCR is faster or cheaper than RLM is therefore unsupported by this paper.</p>
 
-<p><strong>One corpus, one probe set.</strong> Seven probes on one generator is enough to falsify a claim, not enough to establish a distribution. The ablation's two negative results are direct evidence of the probe set's limits.</p>
+<p><strong>Tamper-evident is not tamper-proof.</strong> The durability layer detects corruption, historical rewriting, and rollback, and §5.13 measures that it does. It does not resist an adversary with write access to the store, who can rewrite objects, chain, manifest, and high-water mark together and produce a container that verifies. No signer ships with the implementation, so every result in §5.13 is evidence of tampering rather than resistance to it, and the anti-rollback mark is only as trustworthy as the medium holding it.</p>
+
+<p><strong>Three known failures, unfixed.</strong> Section 5.11 reports DCR losing: a derived figure that arrived as prose is served after its inputs are corrected, a question the history never answers gets an adjacent line rather than a refusal, and two disagreeing sources are settled silently by ingest order. These are reported rather than repaired because each has a principled fix that is larger than a patch — dependency extraction from prose, an admission floor, and a merge-order-independent conflict rule respectively — and shipping a narrow workaround for a benchmark row is how a benchmark stops measuring anything.</p>
+
+<p><strong>Two corpora, twelve probes.</strong> Twelve probes on two generators is enough to falsify a claim, not enough to establish a distribution — and both generators were written by the same people who designed the system. The ablation's two negative results, and the three failures in §5.11, are direct evidence of the probe sets' limits rather than of their adequacy.</p>
 
 <p><strong>Extraction is conservative and non-neural.</strong> The scanner proposes state only for unambiguous shapes. Prose-heavy material stays at L0 and is found by search instead. A model-driven extractor would find more state — and would introduce the failure mode this design most fears, a confidently cached wrong claim, which mandatory provenance mitigates but does not solve.</p>
 
@@ -326,6 +396,9 @@ cargo run --release -- bench --mutate             # mutation and correction, pla
 cargo run --release -- bench --multihop           # does expansion buy anything on a join?
 cargo run --release -- bench --decay              # recency prefilter: latency against recall
 cargo run --release -- bench --consolidate        # a write landing mid-turn
+cargo run --release -- bench --baselines           # Tables 9 and 10
+cargo run --release -- bench --rebuild            # §5.12
+cargo run --release -- bench --tamper             # §5.13
 cargo test                                        # 151 tests</pre>
 
 <h2 id="refs">References</h2>
