@@ -54,7 +54,7 @@ def masthead(for_print: bool) -> str:
   <h1>{TITLE}</h1>
   <p class="subtitle">{SUBTITLE}</p>
   <p class="byline"><b>{AUTHOR}</b> &nbsp;<span>&middot;&nbsp; {AFFIL}</span></p>
-  <p class="affil">Specification, implementation and experiments in the subnext project repository</p>
+  <p class="affil">Specification, implementation and experiments: github.com/s-b-repo/subnext</p>
 </header>"""
 
 
@@ -132,6 +132,7 @@ def build_site(site_dir: Path) -> Path:
       <p class="article-meta reveal">{REPORT_ID} &nbsp;&middot;&nbsp; By <b>{AUTHOR}</b> &nbsp;&middot;&nbsp; {DATE}</p>
       <div class="hero-cta reveal">
         <a class="btn btn-primary" href="papers/{PDF_NAME}" download>Download PDF <span aria-hidden="true">&darr;</span></a>
+        <a class="btn btn-ghost" href="https://github.com/s-b-repo/subnext">Source &amp; experiments <span aria-hidden="true">&rarr;</span></a>
         <a class="btn btn-ghost" href="research.html">All research <span aria-hidden="true">&rarr;</span></a>
       </div>
       <ul class="hero-stats reveal" aria-label="At a glance">

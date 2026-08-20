@@ -273,7 +273,7 @@ FIGURE_SCALE
 <p>The measurements support a narrow, useful claim: a working set of a few hundred tokens can answer the same questions as a 27,000-token transcript, and stays the same size as that transcript grows 33× larger. They also show where the design is not yet earned — retrieval is still linear, and two of our mechanisms are not validated by our own benchmark. We would rather publish that than a table with no negative rows.</p>
 
 <h2 id="s9">Availability</h2>
-<p>The specification wiki, the Rust implementation, and every experiment in this paper live in the <span class="tt">subnext</span> project repository. All results reproduce offline with no API key and no network access:</p>
+<p>The specification wiki, the Rust implementation, and every experiment in this paper are available at <span class="tt">github.com/s-b-repo/subnext</span>. All results reproduce offline with no API key and no network access:</p>
 <pre class="snippet">cargo run --release -- bench                      # Table 3
 cargo run --release -- bench --scaling            # Table 4, Figure 2
 cargo run --release -- bench --sweep              # Table 5
@@ -300,5 +300,5 @@ cargo test                                        # 75 tests</pre>
 </ol>
 
 <div class="footnotes">
-<p><span class="fn">1</span> The recursive-language-model framing used here is taken from the Dynamic Context Runtime specification wiki (the <span class="tt">subnext</span> project repository), which describes the primitive as treating context as a variable in a REPL that the model can slice and recursively query. This paper responds to that framing; it does not evaluate against any particular implementation of it.</p>
+<p><span class="fn">1</span> The recursive-language-model framing used here is taken from the Dynamic Context Runtime specification wiki (<span class="tt">github.com/s-b-repo/subnext</span>), which describes the primitive as treating context as a variable in a REPL that the model can slice and recursively query. This paper responds to that framing; it does not evaluate against any particular implementation of it.</p>
 </div>
