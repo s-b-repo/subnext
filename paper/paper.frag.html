@@ -1,7 +1,7 @@
 <section class="abstract">
 <h2>Abstract</h2>
 <p>Language models degrade as irrelevant, stale, and superseded material accumulates in their context — a failure commonly called <em>context rot</em>. Enlarging the context window does not remove it: attention cost grows quadratically, mid-context material is used unreliably, and a corrected fact does not stop competing with the value it replaced. We describe the <strong>Dynamic Context Runtime</strong> (DCR), a system that separates <em>unbounded history</em> from <em>bounded attention</em>. History is stored as immutable, addressable spans and compiled into a typed dependency graph of facts, decisions, and derivations, each bound to the spans that ground it. Each turn, a planner assembles a small working set by solving a multiple-choice knapsack over (node, representation-level) pairs under an explicit token budget, so the model never sees the transcript — only the cheapest sufficient representation of what the current question needs.</p>
-<p>We give a zero-dependency Rust reference implementation (7,492 lines) that enforces the design's invariants in code rather than in prose: unsourced facts are rejected at insertion, nothing is deleted, and no stale node reaches the model. We evaluate it with a deliberately non-neural instrument — a deterministic line-matching reasoner shared by all conditions — which isolates the quality of <em>context assembly</em> from the quality of the model. On a 300-turn synthetic incident transcript (27,362 tokens), DCR answers all seven probes using 467 tokens per query on average, 59× less attention than the full history, and answers all seven from a 200-token budget. Across a 33× growth in history (8.5k → 283k tokens) the working set stays flat at ~420 tokens with no loss of correctness. An ablation identifies which mechanisms carry which probes — and reports two that carry nothing on this corpus. A positive control turns the runtime's stale-fact metric from a zero that could not fire into a measured guard, and a read-coverage metric — the offline dual of audit completeness — shows the fraction of history the model ever actually sees collapsing toward zero as history grows: the blind region, not the working set, is what grows with <span class="m">N</span>. We state plainly what the evaluation cannot show: it is a synthetic corpus, the instrument is not a language model, and we do not compare against a recursive-language-model implementation.</p>
+<p>We give a zero-dependency Rust reference implementation (13,288 lines in <code>src/</code>) that enforces the design's invariants in code rather than in prose: unsourced facts are rejected at insertion, nothing is deleted, and no stale node reaches the model. We evaluate it with a deliberately non-neural instrument — a deterministic line-matching reasoner shared by all conditions — which isolates the quality of <em>context assembly</em> from the quality of the model. On a 300-turn synthetic incident transcript (27,362 tokens), DCR answers all seven probes using 462 tokens per query on average, 59× less attention than the full history, and answers all seven from a 200-token budget. Across a 33× growth in history (8.5k → 283k tokens) the working set stays flat at ~410 tokens with no loss of correctness. An ablation identifies which mechanisms carry which probes — and reports two that carry nothing on this corpus. A positive control turns the runtime's stale-fact metric from a zero that could not fire into a measured guard, and a read-coverage metric — the offline dual of audit completeness — shows the fraction of history the model ever actually sees collapsing toward zero as history grows: the blind region, not the working set, is what grows with <span class="m">N</span>. We state plainly what the evaluation cannot show: it is a synthetic corpus, the instrument is not a language model, and we do not compare against a recursive-language-model implementation.</p>
 </section>
 
 <h2 id="s1">1&ensp;Introduction</h2>
@@ -80,7 +80,7 @@ FIGURE_ARCH
 <p>Given a budget <span class="m">B</span> in tokens, the runtime solves</p>
 <div class="eq">maximise &nbsp; <span class="m">U(S)</span> &nbsp;&nbsp; over <span class="m">S ⊆ M</span> &nbsp;&nbsp; subject to &nbsp; <span class="m">Σ<sub>x∈S</sub> cost(x) ≤ B</span></div>
 <p>where <span class="m">M</span> is the candidate set. Because the same node may be admitted at several levels, and at most one, this is a multiple-choice knapsack <span class="cite">[13]</span>. We solve it exactly by dynamic programming over quantised costs, with the quantum chosen so the table stays a fixed width regardless of budget; costs round up, so a solution can never exceed <span class="m">B</span>.</p>
-<p>Two properties follow from the formulation rather than from added heuristics. <strong>Demotion beats eviction</strong>: a cheaper level with non-zero value dominates the skip option, so under pressure the optimiser first moves nodes down the ladder and only then drops them. And <strong>the budget is a ceiling, not a target</strong>: when the plan needs less, the surplus is simply unspent — a behaviour visible in §5.6, where the working set stops growing at 467 tokens no matter how much budget is offered.</p>
+<p>Two properties follow from the formulation rather than from added heuristics. <strong>Demotion beats eviction</strong>: a cheaper level with non-zero value dominates the skip option, so under pressure the optimiser first moves nodes down the ladder and only then drops them. And <strong>the budget is a ceiling, not a target</strong>: when the plan needs less, the surplus is simply unspent — a behaviour visible in §5.6, where the working set stops growing at 462 tokens no matter how much budget is offered.</p>
 
 <h3>3.6&ensp;The planner</h3>
 <p>Each turn: (i) classify the query; (ii) seed by hybrid lexical–vector search over <em>state nodes</em> — where the vector channel is a 256-dimensional hashing embedding over word and sub-word tokens rather than a learned semantic one, so the two channels are correlated rather than independent evidence, discarding seeds below a fraction of the top score; (iii) expand along dependency edges with depth and fan-out caps; (iv) assign each candidate its cheapest sufficient level from a routing table; (v) solve the knapsack; (vi) score the remainder for speculative prefetch.</p>
@@ -93,9 +93,21 @@ FIGURE_ARCH
 <p>Nodes likely to be needed next are materialised in advance by an online logistic predictor over cheap features, trained on whether each prefetch was actually used. Prefetch consumes a <em>separate</em> materialisation budget denominated in build operations, never attention tokens: speculation that competes for the active window starves the computation it was meant to accelerate.</p>
 <p>Finally, the Memory Runtime consolidates in the background while the Reasoner is thinking, and may invalidate a fact the Reasoner is mid-way through using. Every plan records a store version; after the model answers, the runtime checks whether anything in the working set was invalidated during the call and rebuilds rather than returning an answer grounded in state that no longer holds. This is snapshot isolation with an interrupt <span class="cite">[12]</span>.</p>
 
+<h3>3.9&ensp;Authenticated durability</h3>
+
+<p>Every mechanism above assumes the memory runtime returns what it stored. That assumption does a great deal of work and nothing in the design so far earns it. A single JSON store can be edited in any text editor and reloaded without anything noticing; a disk can flip a bit in a span nobody has read for a year; a process killed mid-write can leave half an object. None of these are exotic, and all of them end the same way — the reasoner is handed something that is not what the runtime meant to store. A system whose central claim is that compressed state remains <em>auditable</em> has to be able to prove the state it audits is the state it wrote.</p>
+
+<p>Context is therefore stored as a content-addressed, append-only container. Each object — document, span, node, edge — is addressed by the SHA-256 of its canonical encoding, so modifying an object changes its address and there is no such thing as an edited object, only a different one. The object set is summarised by a Merkle root, which lets any single object be verified against the committed state with <span class="m">log n</span> hashes rather than by reading the store. Each generation is sealed by a checkpoint that chains to its parent, <span class="m">chain<sub>n</sub> = H(chain<sub>n&minus;1</sub> &#8214; checkpoint<sub>n</sub>)</span>, so altering any historical generation invalidates every later one. Generations are monotonic and the highest ever accepted is persisted separately, which is secure-boot logic applied to memory state: an attacker cannot substitute an older, internally consistent version.</p>
+
+<p>Two separations matter more than the mechanism. The first is that <strong>integrity is not trust</strong>. Cryptographic verification answers <em>was this modified since it was written</em>; it says nothing about whether what was written was true, or whether its author should have been believed. Those are a per-object trust label and an admission policy, kept deliberately distinct from verification state, and the gateway checks them <em>last</em> — so an object is shown to be intact, authentic and current before its content is judged, and a perfectly signed instruction from a low-trust source is still refused. The second is that detection is not repair. Signatures notice corruption and fix nothing, so a scrubber walks the store, recomputes digests, and repairs from a replica only once that replica verifies independently — hashing to the address being repaired <em>and</em> proving against the committed root. A scrubber that skips that check is a mechanism for spreading corruption evenly.</p>
+
+<p>The whole admission path collapses to one rule, enforced in one place rather than checked in five and forgotten in a sixth: <strong>no context enters trusted reasoning unless integrity is verified, the signature and provenance are valid, the generation is acceptable, the schema is valid, and policy allows it.</strong></p>
+
+<p>What this does <em>not</em> provide is worth stating with equal force, because "cryptographically authenticated memory" invites a stronger reading than the construction supports. Without a signing key the container is <strong>tamper-evident, not tamper-proof</strong>. It detects bit rot, truncation, partial writes and casual edits, because none of those arrive with a recomputed chain. An attacker with write access to the directory can rewrite the objects, the chain, the manifest and the high-water mark together and produce a store that verifies cleanly, and no amount of hashing prevents that. Signatures raise the bar; genuine anti-rollback additionally requires the high-water mark to live somewhere the attacker cannot write. The implementation ships no signer at all (§4), so what is measured in §5.13 is evidence, not proof.</p>
+
 <h2 id="s4">4&ensp;Implementation</h2>
 
-<p>The reference implementation is 7,492 lines of Rust (edition 2024) with <strong>no external crates</strong>. Hashing, text scanning, JSON persistence, and argument parsing are all in-tree. This is a deliberate choice for a specification's reference implementation: a reader can audit every line that stands between the design and the measurement, and the build has no supply chain. A consequence worth stating is that the extractor is a hand-written scanner rather than a regular-expression engine — which turned out to read better as a parser than the pattern it replaced.</p>
+<p>The reference implementation is 13,288 lines of Rust in <code>src/</code> (edition 2024), plus roughly 3,000 lines of tests, with <strong>no external crates</strong>. Hashing, text scanning, JSON persistence, and argument parsing are all in-tree. This is a deliberate choice for a specification's reference implementation: a reader can audit every line that stands between the design and the measurement, and the build has no supply chain. A consequence worth stating is that the extractor is a hand-written scanner rather than a regular-expression engine — which turned out to read better as a parser than the pattern it replaced.</p>
 
 <table class="small">
 <caption><strong>Table 1.</strong> Module map. Each design element has one home.</caption>
@@ -120,9 +132,9 @@ FIGURE_ARCH
 
 <p><strong>Structure.</strong> The graph is a vector of nodes plus an identifier index, with edges as index pairs — no reference-counted ownership cycles. Interior mutability is confined to exactly one place: the per-node level cache and the read counters, because materialising a cheaper representation is logically a read, and requiring an exclusive borrow there would prevent the planner from holding the graph while pricing what is in it.</p>
 
-<p><strong>Cost.</strong> The knapsack is <span class="m">O(n · B/q)</span> for <span class="m">n</span> candidates, budget <span class="m">B</span>, and quantum <span class="m">q</span> chosen to keep <span class="m">B/q</span> at a fixed 400. Lexical retrieval is sub-linear through an inverted index; vector retrieval is a linear scan over state nodes, which is the implementation's most consequential shortcut and is examined in §6.</p>
+<p><strong>Cost.</strong> The knapsack is <span class="m">O(n · B/q)</span> for <span class="m">n</span> candidates, budget <span class="m">B</span>, and quantum <span class="m">q</span> chosen to keep <span class="m">B/q</span> at a fixed 400. Lexical retrieval is sub-linear through an inverted index. Vector retrieval has two paths: an exact scan over state nodes, and an approximate one using random-hyperplane LSH over the same hashing embedding — 8 tables of 12 bits, planes drawn from a fixed seed so that two runs of one configuration agree, multi-probe over 1-bit neighbours, and a fall back to the exact scan whenever a query's buckets cannot supply <em>k</em>, so pruning is never a source of silent misses. The exact path is the default and every attention figure here comes from it; §6 reports what the approximate one costs and, more usefully, what it revealed.</p>
 
-<p>The implementation ships 140 tests. One hundred and thirteen cover the runtime described here, encoding its invariants as executable claims — that an unsourced fact is rejected, that a superseded node stays in the graph, that a stale node never enters a plan, that the stale-fact read metric can be driven non-zero and the guard drives it back to zero (&sect;5.9), that disabling supersession makes the mutation probe's negative control fail rather than silently pass, that a hypothesis never renders like an observation, that the knapsack never exceeds its budget and matches a brute-force optimum on small instances, and that the working set stays bounded as history grows. The remaining twenty-seven cover a durability layer this report does not otherwise describe: a content-addressed object container with a hash chain over generations, in which editing history invalidates every generation after it, and bit-rot repair that is refused from any replica which does not itself verify.</p>
+<p>The implementation ships 151 tests. One hundred and twenty-four cover the runtime described here, encoding its invariants as executable claims — that an unsourced fact is rejected, that a superseded node stays in the graph, that a stale node never enters a plan, that the stale-fact read metric can be driven non-zero and the guard drives it back to zero (&sect;5.9), that disabling supersession makes the mutation probe's negative control fail rather than silently pass, that a hypothesis never renders like an observation, that the knapsack never exceeds its budget and matches a brute-force optimum on small instances, and that the working set stays bounded as history grows. The remaining twenty-seven cover a durability layer this report does not otherwise describe: a content-addressed object container with a hash chain over generations, in which editing history invalidates every generation after it, and bit-rot repair that is refused from any replica which does not itself verify.</p>
 
 <h2 id="s5">5&ensp;Evaluation</h2>
 
@@ -156,15 +168,15 @@ FIGURE_ARCH
 <caption><strong>Table 3.</strong> 300 turns, 27,362 tokens of history, <span class="m">B</span> = 1,200, window = 8,000. Tokens are per query.</caption>
 <thead><tr><th>Probe</th><th class="c">full context</th><th class="c">sliding window</th><th class="c">DCR</th><th class="r">DCR tokens</th></tr></thead>
 <tbody>
-<tr><td>corrected fact (mid-history)</td><td class="c ok">ok</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="r">163</td></tr>
-<tr><td>corrected fact (late)</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="r">456</td></tr>
+<tr><td>corrected fact (mid-history)</td><td class="c ok">ok</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="r">196</td></tr>
+<tr><td>corrected fact (late)</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="r">419</td></tr>
 <tr><td>old fact, never repeated</td><td class="c miss">miss</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="r">399</td></tr>
 <tr><td>exact quote</td><td class="c miss">miss</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="r">963</td></tr>
 <tr><td>justification</td><td class="c ok">ok</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="r">192</td></tr>
 <tr><td>detail buried in a long span</td><td class="c ok">ok</td><td class="c miss">miss</td><td class="c ok">ok</td><td class="r">962</td></tr>
-<tr><td>corrected fact (very late)</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="r">136</td></tr>
+<tr><td>corrected fact (very late)</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="c ok">ok</td><td class="r">102</td></tr>
 <tr class="total"><td>correct</td><td class="c">5 / 7</td><td class="c">2 / 7</td><td class="c">7 / 7</td><td class="r">—</td></tr>
-<tr class="total"><td>mean tokens per query</td><td class="c">27,362</td><td class="c">7,968</td><td class="c">467</td><td class="r">59× less</td></tr>
+<tr class="total"><td>mean tokens per query</td><td class="c">27,362</td><td class="c">7,968</td><td class="c">462</td><td class="r">59× less</td></tr>
 </tbody>
 </table>
 
@@ -184,13 +196,13 @@ FIGURE_SCALE
 <thead><tr><th class="r">turns</th><th class="r">history (tok)</th><th class="r">state nodes</th><th class="r">mean k</th><th class="r">max k</th><th class="c">correct</th><th class="r">ingest</th><th class="r">query</th></tr></thead>
 <tbody>
 <tr><td class="r">100</td><td class="r">8,482</td><td class="r">124</td><td class="r">422.1</td><td class="r">764</td><td class="c">7/7</td><td class="r">0.01 s</td><td class="r">0.6 ms</td></tr>
-<tr><td class="r">300</td><td class="r">27,362</td><td class="r">298</td><td class="r">417.0</td><td class="r">787</td><td class="c">7/7</td><td class="r">0.04 s</td><td class="r">1.3 ms</td></tr>
+<tr><td class="r">300</td><td class="r">27,362</td><td class="r">298</td><td class="r">411.6</td><td class="r">787</td><td class="c">7/7</td><td class="r">0.04 s</td><td class="r">1.3 ms</td></tr>
 <tr><td class="r">1,000</td><td class="r">93,442</td><td class="r">911</td><td class="r">404.0</td><td class="r">793</td><td class="c">7/7</td><td class="r">0.16 s</td><td class="r">2.9 ms</td></tr>
 <tr><td class="r">3,000</td><td class="r">283,253</td><td class="r">2,661</td><td class="r">418.7</td><td class="r">795</td><td class="c">7/7</td><td class="r">0.92 s</td><td class="r">15.1 ms</td></tr>
 </tbody>
 </table>
 
-<p>Across a 33× growth in history the mean working set moves by 1% and the maximum by 4%, with correctness unchanged. This supports the bounded-attention claim. It does <em>not</em> establish <span class="m">O(k + r)</span> end to end: the query-latency column grows 25× over the same range, because vector retrieval in this implementation is a linear scan over state nodes. The cost model requires sub-linear retrieval, and this implementation does not yet provide it. We consider that the most important gap between the design and the artefact.</p>
+<p>Across a 33× growth in history the mean working set moves by 1% and the maximum by 4%, with correctness unchanged. This supports the bounded-attention claim. It does <em>not</em> establish <span class="m">O(k + r)</span> end to end: query latency still grows over the same range. We previously attributed that to vector retrieval being a linear scan over state nodes, and the attribution was wrong. Pruning with LSH removes roughly 96% of the vectors a query scores and takes the index call to a small fraction of a millisecond, and end-to-end latency at 3,000 turns falls by about a factor of three — but it does not flatten, because with the index that cheap the growth is in planning rather than retrieval. Sub-linear retrieval was a necessary condition and not the binding one; the gap between the design and the artefact is real and now sits somewhere else.</p>
 
 <h3>5.6&ensp;Result 3 — how small can the window be?</h3>
 
@@ -199,13 +211,13 @@ FIGURE_SCALE
 <thead><tr><th class="r">B_attention</th><th class="c">correct</th><th class="r">mean k</th><th class="r">max k</th><th class="r">escalation rate</th><th class="r">demotions</th></tr></thead>
 <tbody>
 <tr><td class="r">120</td><td class="c">6 / 7</td><td class="r">104.9</td><td class="r">120</td><td class="r">0.14</td><td class="r">10</td></tr>
-<tr><td class="r">200</td><td class="c">7 / 7</td><td class="r">182.9</td><td class="r">200</td><td class="r">0.14</td><td class="r">4</td></tr>
-<tr><td class="r">300</td><td class="c">7 / 7</td><td class="r">239.7</td><td class="r">300</td><td class="r">0.14</td><td class="r">11</td></tr>
-<tr><td class="r">500</td><td class="c">7 / 7</td><td class="r">333.7</td><td class="r">500</td><td class="r">0.14</td><td class="r">10</td></tr>
-<tr><td class="r">800</td><td class="c">7 / 7</td><td class="r">417.0</td><td class="r">787</td><td class="r">0.14</td><td class="r">7</td></tr>
-<tr><td class="r">1,200</td><td class="c">7 / 7</td><td class="r">467.3</td><td class="r">963</td><td class="r">0.14</td><td class="r">3</td></tr>
-<tr><td class="r">2,000</td><td class="c">7 / 7</td><td class="r">467.3</td><td class="r">963</td><td class="r">0.14</td><td class="r">3</td></tr>
-<tr><td class="r">4,000</td><td class="c">7 / 7</td><td class="r">467.3</td><td class="r">963</td><td class="r">0.14</td><td class="r">3</td></tr>
+<tr><td class="r">200</td><td class="c">7 / 7</td><td class="r">182.7</td><td class="r">200</td><td class="r">0.14</td><td class="r">4</td></tr>
+<tr><td class="r">300</td><td class="c">7 / 7</td><td class="r">238.3</td><td class="r">300</td><td class="r">0.14</td><td class="r">11</td></tr>
+<tr><td class="r">500</td><td class="c">7 / 7</td><td class="r">328.3</td><td class="r">500</td><td class="r">0.14</td><td class="r">10</td></tr>
+<tr><td class="r">800</td><td class="c">7 / 7</td><td class="r">411.6</td><td class="r">787</td><td class="r">0.14</td><td class="r">7</td></tr>
+<tr><td class="r">1,200</td><td class="c">7 / 7</td><td class="r">461.9</td><td class="r">963</td><td class="r">0.14</td><td class="r">3</td></tr>
+<tr><td class="r">2,000</td><td class="c">7 / 7</td><td class="r">461.9</td><td class="r">963</td><td class="r">0.14</td><td class="r">3</td></tr>
+<tr><td class="r">4,000</td><td class="c">7 / 7</td><td class="r">461.9</td><td class="r">963</td><td class="r">0.14</td><td class="r">3</td></tr>
 </tbody>
 </table>
 
@@ -217,13 +229,13 @@ FIGURE_SCALE
 <caption><strong>Table 6.</strong> Ablation at <span class="m">B</span> = 1,200, 300 turns. One mechanism disabled per row.</caption>
 <thead><tr><th>Variant</th><th class="c">correct</th><th class="r">mean k</th><th>Probes that fail</th></tr></thead>
 <tbody>
-<tr class="total"><td>full runtime</td><td class="c">7 / 7</td><td class="r">467.3</td><td>—</td></tr>
-<tr><td>no supersession</td><td class="c">5 / 7</td><td class="r">629.9</td><td>corrected fact (mid-history); corrected fact (late)</td></tr>
-<tr><td>no escalation</td><td class="c">6 / 7</td><td class="r">452.6</td><td>detail buried in a long span</td></tr>
-<tr><td>L2 only (no ladder)</td><td class="c">5 / 7</td><td class="r">386.9</td><td>exact quote; detail buried in a long span</td></tr>
-<tr><td>no seed floor</td><td class="c">7 / 7</td><td class="r">649.0</td><td>— (costs 39% more tokens)</td></tr>
-<tr><td>no reference linking</td><td class="c">7 / 7</td><td class="r">467.3</td><td>— (no effect on this corpus)</td></tr>
-<tr><td>no graph expansion</td><td class="c">7 / 7</td><td class="r">252.1</td><td>— (and 46% <em>cheaper</em>)</td></tr>
+<tr class="total"><td>full runtime</td><td class="c">7 / 7</td><td class="r">461.9</td><td>—</td></tr>
+<tr><td>no supersession</td><td class="c">5 / 7</td><td class="r">640.9</td><td>corrected fact (mid-history); corrected fact (late)</td></tr>
+<tr><td>no escalation</td><td class="c">6 / 7</td><td class="r">447.1</td><td>detail buried in a long span</td></tr>
+<tr><td>L2 only (no ladder)</td><td class="c">5 / 7</td><td class="r">381.4</td><td>exact quote; detail buried in a long span</td></tr>
+<tr><td>no seed floor</td><td class="c">7 / 7</td><td class="r">638.9</td><td>— (costs 39% more tokens)</td></tr>
+<tr><td>no reference linking</td><td class="c">7 / 7</td><td class="r">461.9</td><td>— (no effect on this corpus)</td></tr>
+<tr><td>no graph expansion</td><td class="c">7 / 7</td><td class="r">242.0</td><td>— (and 46% <em>cheaper</em>)</td></tr>
 </tbody>
 </table>
 
@@ -278,7 +290,7 @@ FIGURE_SCALE
 
 <p><strong>Token counts are estimated</strong> by a character heuristic rather than a real tokeniser, uniformly across all conditions. Ratios are therefore more trustworthy than absolute counts.</p>
 
-<p><strong>Retrieval is linear.</strong> The cost model requires sub-linear retrieval as one of its three conditions; the implementation satisfies the other two and not this one. The bounded-attention result stands, the end-to-end complexity claim does not.</p>
+<p><strong>Retrieval is no longer the binding constraint.</strong> The cost model requires sub-linear retrieval as one of its three conditions; the approximate index supplies it, and end-to-end latency still grows, because the planner's own cost does and we have not shown that to be sub-linear. The bounded-attention result stands. The end-to-end complexity claim does not, and the reason it does not has changed — worth saying plainly, because an earlier version of this section named the wrong cause with more confidence than the evidence supported.</p>
 
 <h2 id="s7">7&ensp;Open problems</h2>
 
@@ -309,9 +321,12 @@ cargo run --release -- bench --scaling            # Table 4, Figure 2
 cargo run --release -- bench --sweep              # Table 5
 cargo run --release -- bench --ablate             # Table 6
 cargo run --release -- bench --poison             # Table 7 (stale-fact control)
-cargo run --release -- bench --coverage           # Table 8 (read coverage)
-cargo run --release -- bench --mutate             # Table 7
-cargo test                                        # 140 tests</pre>
+cargo run --release -- bench --coverage           # Table 8 (read coverage, and pair coverage)
+cargo run --release -- bench --mutate             # mutation and correction, plain and adversarial
+cargo run --release -- bench --multihop           # does expansion buy anything on a join?
+cargo run --release -- bench --decay              # recency prefilter: latency against recall
+cargo run --release -- bench --consolidate        # a write landing mid-turn
+cargo test                                        # 151 tests</pre>
 
 <h2 id="refs">References</h2>
 <ol class="refs">
