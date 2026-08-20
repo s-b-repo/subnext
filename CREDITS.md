@@ -100,7 +100,20 @@ version already did. `RESULTS.md` now carries the three-line procedure rather
 than the conclusion.
 
 It is the failure this project is least able to see on its own, because in every
-case the artefact looks exactly like a working one.
+case the artefact looks exactly like a working one. Describing the class confers
+no immunity to it: the fourth instance was committed by someone who had just
+finished writing up the third.
+
+A fifth of the same shape was found in the editing tooling — a `str.replace`
+that did not assert its pattern matched, so a stale pattern produced a
+successful-looking run and an unchanged file, in the very edit meant to record
+this finding. It is **not** counted with the four, and the criterion is worth
+stating because otherwise the count can be inflated or deflated at will. The
+four each produced *false confidence in a stated result*: a published claim
+rested on a check that could not fail. The fifth produced an *absent* result —
+the finding simply was not written. Absence is more detectable and less
+dangerous than unfounded confidence, and a count that admits both measures
+nothing.
 
 **Landed.** `3821cc5`, `7a89511`.
 
@@ -111,8 +124,14 @@ path that only runs under `--release` is always wrong and always greppable, and
 is proposed as an audit pattern. The other two shapes, a metric unexercisable in
 the configuration that disables it and a pass reachable through an unobserved
 shortcut, have no mechanical form and were found by argument. How many remain is
-unknown, and the paper's threats section now says so rather than implying the
+unknown, and the paper's threats section says so rather than implying the
 problem is closed.
+
+"Found by argument, not by tooling" is too strong, and the fifth instance is the
+counter-example: it was found by re-running an edit, and only because the second
+attempt **failed loudly**. Assertion is what converts a same-shaped check into a
+useful one. The accurate claim is narrower — tooling finds these exactly when it
+is built to fail noisily, and most of it is not.
 
 ---
 
