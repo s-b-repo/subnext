@@ -131,9 +131,19 @@ pub fn run_demo(budget: usize) -> Result<Dcr, DcrError> {
     );
 
     println!("\n{rule}\n5. RECOMPUTE — L3 derivation, memoised into C_t\n{rule}");
-    let rate = *runtime.graph.by_key("hourly.rate", true).last().unwrap();
-    let hours = *runtime.graph.by_key("incident.hours", true).last().unwrap();
-    let engineers = *runtime.graph.by_key("engineer.count", true).last().unwrap();
+    // These three facts are ingested at the top of this function, so the lookups
+    // succeed on the demo corpus. Handle the empty case anyway rather than
+    // unwrap: a demo that panics because someone edited the transcript is a
+    // worse failure than one that says why it stopped.
+    let latest = |key: &str| runtime.graph.by_key(key, true).last().copied();
+    let (Some(rate), Some(hours), Some(engineers)) = (
+        latest("hourly.rate"),
+        latest("incident.hours"),
+        latest("engineer.count"),
+    ) else {
+        println!("(recompute demo skipped: expected facts not extracted from the transcript)");
+        return Ok(runtime);
+    };
     let deps: Vec<String> = [rate, hours, engineers]
         .iter()
         .map(|&i| runtime.graph.node(i).id.clone())

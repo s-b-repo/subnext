@@ -196,6 +196,17 @@ that competes for the window.
   contradiction pointers, the corrective flag, the derivation and the L0 read
   counters are all fields the compiler checks.
 
+## Auditing
+
+`scripts/audit-bad-patterns.sh` runs the [rustsploit](https://github.com/s-b-repo/rustsploit)
+bad-pattern regex matrix against `src/`. That matrix is calibrated for an async
+offensive-security tool that parses hostile input, so several of its rules do
+not apply to a synchronous offline library; `AUDIT.md` records the disposition
+of every residual strict hit rather than leaving the count unexplained. The
+genuine findings it surfaced — three panicking `unwrap`s in the demo, an
+`expect` in the budget solver, and an indexed access in the reasoner — are
+fixed; section A now holds only value-providing `unwrap_or_default`.
+
 ## Known limitations
 
 * **Retrieval is O(nodes).** The vector index is a linear scan. The cost model

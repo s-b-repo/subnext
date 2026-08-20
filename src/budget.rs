@@ -63,16 +63,19 @@ impl Candidate {
         }
     }
 
-    pub fn cheapest(&self) -> Choice {
-        *self
-            .options
+    /// The lowest-cost option, or `None` for an optionless candidate. Total by
+    /// construction — the panic the old `expect` documented is now a type the
+    /// caller must handle, so a candidate with no options can never reach the
+    /// reserved-cost accumulation.
+    pub fn cheapest(&self) -> Option<Choice> {
+        self.options
             .iter()
             .min_by(|a, b| {
                 a.cost
                     .cmp(&b.cost)
                     .then(a.level.order().cmp(&b.level.order()))
             })
-            .expect("candidate with no options")
+            .copied()
     }
 }
 
@@ -115,11 +118,10 @@ pub fn solve(
     // flood of cheap high-utility trivia can never squeeze out a constraint.
     let mut forced: HashMap<NodeIdx, Choice> = HashMap::new();
     let mut reserved = 0usize;
-    for candidate in candidates
-        .iter()
-        .filter(|c| c.pinned && !c.options.is_empty())
-    {
-        let option = candidate.cheapest();
+    for candidate in candidates.iter().filter(|c| c.pinned) {
+        let Some(option) = candidate.cheapest() else {
+            continue;
+        };
         reserved += option.cost;
         forced.insert(candidate.node, option);
     }

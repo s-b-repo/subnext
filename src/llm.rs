@@ -170,7 +170,12 @@ impl Reasoner for LocalReasoner {
         let mut scored: Vec<(f32, &ContextLine)> =
             lines.iter().map(|l| (Self::score(&query, l), l)).collect();
         scored.sort_by(|a, b| b.0.total_cmp(&a.0));
-        let (best_score, best) = &scored[0];
+        // `scored` is built from `lines`, which the guard above proved
+        // non-empty, so `first()` is always `Some`; use it anyway so the method
+        // carries no index that could panic if that guard ever moves.
+        let Some((best_score, best)) = scored.first() else {
+            return "I don't have that in the active context.".to_string();
+        };
         let escalatable = best.level != "L0" && !self.escalated.contains(&best.node);
 
         if *best_score < self.threshold {
