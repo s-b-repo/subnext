@@ -142,6 +142,13 @@ including one of the five. What is uniform is not who did the catching but the
 comparison of two artefacts. **Re-reading a claim caught nothing, for anyone, at
 any point today.**
 
+And memory is not one of the instruments. It is a lossy copy of the first
+reading, and it is the copy that agrees with you — which is why the cheapest
+failure of the day was a claim contradicted by a list in the same document,
+written from recall while the record sat open. What every real instrument on
+that list has, and memory lacks, is that it can return an answer its operator
+did not expect.
+
 So the requirement is a second instrument rather than a second pair of eyes.
 Another person is one instrument and the most reliable one available; re-running,
 re-measuring and counting are others, and an author working alone has those for
