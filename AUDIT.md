@@ -203,9 +203,9 @@ A tool that silently passes on an empty directory is worth more scrutiny than
 the code it audits — it had been reporting success for a case where it had
 examined nothing.
 
-### The crate's first , and why it is not the one removed today
+### The crate's first `debug_assert`, and why it is not the one removed today
 
- asserts that the live-by-key index agrees positionally with
+`src/graph.rs:575` asserts that the live-by-key index agrees positionally with
 `by_key(key, true)`. It is section A's +1 at `cc5dc7f`, and it is a legitimate
 new hit rather than drift.
 
