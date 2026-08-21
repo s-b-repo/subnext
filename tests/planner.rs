@@ -243,3 +243,35 @@ fn disabling_the_l0_memo_restores_the_repeated_work() {
          is not doing anything and neither is the flag"
     );
 }
+
+/// The embedder is a seam, not a hard-coded call.
+///
+/// The docs claimed "the interface accepts any `str -> Vec<f32>`" long before
+/// it did — `Ladder` called the hashing embedder directly. This asserts the
+/// claim rather than restating it: a replacement embedder must actually be the
+/// one producing the vectors.
+#[test]
+fn the_vector_channel_is_swappable() {
+    #[derive(Debug)]
+    struct Constant;
+    impl dcr::embed::Embedder for Constant {
+        fn embed(&self, _text: &str) -> Vec<f32> {
+            vec![1.0, 0.0, 0.0, 0.0]
+        }
+        fn dim(&self) -> usize {
+            4
+        }
+    }
+
+    let mut rt = runtime();
+    rt.ladder.embedder = Box::new(Constant);
+    assert_eq!(rt.ladder.embedder.dim(), 4);
+    assert_eq!(rt.ladder.query_vector("anything at all"), vec![1.0, 0.0, 0.0, 0.0]);
+
+    // And the runtime still plans through it rather than falling back.
+    let context = rt.plan("what is the server ip?", None);
+    assert!(
+        !context.entries.is_empty(),
+        "a replaced embedder must still produce a plan"
+    );
+}

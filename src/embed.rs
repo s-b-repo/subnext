@@ -65,3 +65,49 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     }
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
+
+/// Anything that turns text into a vector.
+///
+/// The documentation has claimed since the first release that "the interface
+/// accepts any `str -> Vec<f32>`". It did not: `Ladder` called
+/// [`hashing_embed`] directly, so swapping the embedder meant editing the
+/// runtime. This is that claim made true.
+///
+/// The default stays [`HashingEmbedder`], because the whole runtime is offline,
+/// deterministic and dependency-free, and a learned embedder is none of those.
+/// What changes is that replacing it is now a constructor argument rather than
+/// a patch.
+pub trait Embedder: std::fmt::Debug {
+    fn embed(&self, text: &str) -> Vec<f32>;
+
+    /// Dimensionality. Vectors from one embedder are never comparable with
+    /// another's, so this is checked rather than assumed where it matters.
+    fn dim(&self) -> usize;
+}
+
+/// The bundled embedder: word + character-trigram hashing, 256 dimensions.
+///
+/// Fast, offline and reproducible across runs. It finds material that shares
+/// vocabulary, which is why paraphrase retrieval is a documented poor fit —
+/// `bench --channels` measures how much this channel actually agrees with the
+/// lexical one rather than leaving it asserted.
+#[derive(Debug, Clone, Copy)]
+pub struct HashingEmbedder {
+    pub dim: usize,
+}
+
+impl Default for HashingEmbedder {
+    fn default() -> Self {
+        Self { dim: DIM }
+    }
+}
+
+impl Embedder for HashingEmbedder {
+    fn embed(&self, text: &str) -> Vec<f32> {
+        hashing_embed(text, self.dim)
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+}

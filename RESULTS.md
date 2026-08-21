@@ -330,6 +330,52 @@ end. What changed is that the cost now has a name and a clock on it.
 
 ---
 
+## How independent are the two retrieval channels?
+
+`bench --channels`. The claim that the lexical and vector channels are
+"correlated rather than independent evidence" was in the paper and both
+poor-fit lists, and had never been measured. Standard corpus, 300 turns, 298
+nodes, top-20 per channel:
+
+| | per probe |
+|---|---:|
+| shared by both channels | 3.6 |
+| expected if independent (`K²/N`) | 1.3 |
+| control, measured | 0.7 |
+| **ratio, observed to expected** | **2.7×** |
+
+Rank correlation, mean over the seven probes: **−0.24**, against a control of
+**−0.80**.
+
+Read rho against that control and not against zero. Ranking absent items worst
+makes any two mostly-disjoint lists correlate negatively regardless of their
+order, so the number carries the convention as much as the data. The first
+version of this control shuffled the lexical channel's own ids, which gave it
+100% overlap with the thing it was controlling for while the real comparison had
+11% — it was measuring what the statistic does to a reordering, not what it does
+to two mostly-disjoint lists. The control is now a pseudo-random draw of the
+same size from the same node population, so it reproduces the disjointness as
+well as the disagreement.
+
+**The verdict: dependent, and much less so than the documentation implied.**
+2.7× chance overlap is real dependence. But 195 of 220 ranked positions across
+the probe set were surfaced by exactly one channel, so calling the two
+"correlated rather than independent evidence" overstates it.
+
+**What this does not measure is paraphrase**, which is the thing the poor-fit
+entry rests on. The seven probes were written to be answerable by vocabulary
+overlap — the condition under which these two channels most agree. A paraphrase
+probe set is the measurement still missing.
+
+The embedder is now a real seam: `Ladder::embedder` accepts any `dyn Embedder`
+(`examples/custom_embedder.rs`). The documentation claimed the interface took
+any `str -> Vec<f32>` before it did — `Ladder` called the hashing embedder
+directly. A learned embedder would cost the offline, deterministic property that
+every figure in this file depends on, so none of them transfer to a runtime that
+swaps it.
+
+---
+
 ## Workspace rebuild
 
 "Destroy and rebuild the workspace at any time" is only a guarantee if rebuild

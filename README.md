@@ -167,9 +167,15 @@ exact quote, and it charges for that, but if most of your queries need the whole
 source then bounded attention is the wrong objective.
 
 **Semantic search over paraphrase.** The bundled embedder is a 256-dimensional
-hashing embedding, not a learned one. It finds material that shares vocabulary.
-Genuine paraphrase retrieval needs a real embedding model swapped in — the
-interface takes any `str -> Vec<f32>`.
+hashing embedding, not a learned one; it finds material that shares vocabulary.
+`bench --channels` now measures how much that makes the lexical and vector
+channels agree, instead of asserting it: they share 2.7x more than chance, and
+195 of 220 ranked positions across the probe set came from exactly one channel.
+So "correlated rather than independent evidence" was directionally right and
+overstated. What is still unmeasured is paraphrase itself — the seven probes are
+answerable by vocabulary overlap. Swapping in a learned embedder is a
+constructor argument (`Ladder::embedder`, see `examples/custom_embedder.rs`),
+and it costs the offline, deterministic property every figure here depends on.
 
 **~~Reasoners that cannot signal.~~ Retracted.** This said a harness unable to
 emit `#ESCALATE` loses the exact-quote and buried-detail probes, citing the

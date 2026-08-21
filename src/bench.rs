@@ -18,6 +18,7 @@ use std::time::Instant;
 use crate::baselines::{Rag, Recursive, SummarizeAll};
 use crate::context_store::ContextStore;
 use crate::graph::{DcrError, MemoryGraph};
+use crate::index::Namespace;
 use crate::nodes::{Kind, NodeIdx};
 use crate::llm::{LocalReasoner, Reasoner};
 use crate::runtime::Dcr;
@@ -2437,6 +2438,220 @@ pub fn run_stages(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
     println!(
         "Timings are single-run on one machine and carry the spread every other timing\n\
          here carries; reproduce the ordering between stages, not the microseconds."
+    );
+    Ok(())
+}
+
+/// Spearman rank correlation between two rankings of the same candidate set.
+///
+/// Absent items are given the worst rank rather than dropped, because "the
+/// vector channel never surfaced this at all" is disagreement, not missing data.
+fn rank_correlation(a: &[usize], b: &[usize]) -> Option<f64> {
+    let mut union: Vec<usize> = a.to_vec();
+    for &id in b {
+        if !union.contains(&id) {
+            union.push(id);
+        }
+    }
+    let n = union.len();
+    if n < 3 {
+        return None;
+    }
+    let worst = n as f64;
+    let rank_in = |list: &[usize], id: usize| -> f64 {
+        list.iter().position(|&x| x == id).map_or(worst, |p| p as f64)
+    };
+    let ra: Vec<f64> = union.iter().map(|&id| rank_in(a, id)).collect();
+    let rb: Vec<f64> = union.iter().map(|&id| rank_in(b, id)).collect();
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let (ma, mb) = (mean(&ra), mean(&rb));
+    let mut num = 0.0;
+    let mut da = 0.0;
+    let mut db = 0.0;
+    for i in 0..n {
+        let (x, y) = (ra[i] - ma, rb[i] - mb);
+        num += x * y;
+        da += x * x;
+        db += y * y;
+    }
+    if da <= 0.0 || db <= 0.0 {
+        return None;
+    }
+    Some(num / (da.sqrt() * db.sqrt()))
+}
+
+/// A deterministic pseudo-random ranking of `k` ids drawn from `0..n`.
+///
+/// This is the negative control, and its *structure* matters more than its
+/// randomness. The first version of this control shuffled the lexical channel's
+/// own ids, which gave it 100% overlap with the thing it was controlling for
+/// while the real comparison had 11% — so it reported what the statistic does
+/// to a reordering, not what it does to two mostly-disjoint lists, and the two
+/// numbers were not comparable. Drawing a fresh subset reproduces the
+/// disjointness as well as the disagreement.
+fn random_ranking(n: usize, k: usize, seed: u64) -> Vec<usize> {
+    let mut state = seed;
+    let mut next = || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    let mut out: Vec<usize> = Vec::new();
+    while out.len() < k.min(n) {
+        let pick = (next() % n as u64) as usize;
+        if !out.contains(&pick) {
+            out.push(pick);
+        }
+    }
+    out
+}
+
+#[allow(dead_code)]
+fn shuffled(ids: &[usize], seed: u64) -> Vec<usize> {
+    let mut out = ids.to_vec();
+    let mut state = seed;
+    let mut next = || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    for i in (1..out.len()).rev() {
+        let j = (next() % (i as u64 + 1)) as usize;
+        out.swap(i, j);
+    }
+    out
+}
+
+/// How independent are the lexical and vector channels?
+///
+/// `docs/use-cases.md` states that the bundled 256-dimensional hashing
+/// embedding "finds material sharing vocabulary, and the lexical and vector
+/// channels are therefore correlated rather than independent evidence". That
+/// was asserted, never measured, and it is the stated reason paraphrase search
+/// is a poor fit — so it should carry a number.
+///
+/// The statistic is Spearman rank correlation between the two channels' top-k
+/// over the same query, with absent items ranked worst. A negative control
+/// correlates the lexical channel against a deterministic shuffle of the same
+/// ids: if the measure cannot report independence when the rankings *are*
+/// independent, it cannot support a claim about correlation either.
+pub fn run_channels(turns: usize, budget: usize) -> Result<(), DcrError> {
+    let corpus = build_corpus(turns);
+    let mut runtime = Dcr::new(budget);
+    for (doc_id, text) in &corpus.docs {
+        runtime.ingest(text, Some(doc_id))?;
+    }
+    const K: usize = 20;
+
+    println!(
+        "CHANNEL INDEPENDENCE - {turns} turns, {} nodes, top-{K} per channel",
+        runtime.graph.len()
+    );
+    println!();
+    let header = format!(
+        "{:<46} {:>8} {:>9} {:>9} {:>10}",
+        "probe", "rho", "lex only", "vec only", "shared"
+    );
+    println!("{header}");
+    println!("{}", "-".repeat(header.len()));
+
+    let mut rhos: Vec<f64> = Vec::new();
+    let mut controls: Vec<f64> = Vec::new();
+    let mut only_one = 0usize;
+    let mut shared_total = 0usize;
+    let mut control_shared = 0usize;
+    for probe in &corpus.probes {
+        let qv = runtime.ladder.query_vector(probe.query);
+        let (lex, vec) = runtime
+            .index
+            .channels(Namespace::Node, probe.query, &qv, K);
+        let lex_ids: Vec<usize> = lex.iter().map(|(i, _)| *i).collect();
+        let vec_ids: Vec<usize> = vec.iter().map(|(i, _)| *i).collect();
+        let shared = lex_ids.iter().filter(|i| vec_ids.contains(i)).count();
+        let lex_only = lex_ids.len() - shared;
+        let vec_only = vec_ids.len() - shared;
+        only_one += lex_only + vec_only;
+        shared_total += shared;
+        let rho = rank_correlation(&lex_ids, &vec_ids);
+        if let Some(r) = rho {
+            rhos.push(r);
+        }
+        // Negative control with the same shape: a fresh pseudo-random draw of
+        // K ids from the same node population, so it carries the same
+        // disjointness as the real comparison rather than only the same length.
+        let seed = 0x5DEE_CE66_D1CE_F00D ^ (rhos.len() as u64);
+        let control_ids = random_ranking(runtime.graph.len(), K, seed);
+        if let Some(c) = rank_correlation(&lex_ids, &control_ids) {
+            controls.push(c);
+        }
+        control_shared += lex_ids.iter().filter(|i| control_ids.contains(i)).count();
+        let label: String = probe.label.chars().take(45).collect();
+        match rho {
+            Some(r) => println!(
+                "{label:<46} {r:>8.3} {lex_only:>9} {vec_only:>9} {shared:>10}"
+            ),
+            None => println!(
+                "{label:<46} {:>8} {lex_only:>9} {vec_only:>9} {shared:>10}",
+                "n/a"
+            ),
+        }
+    }
+    println!("{}", "-".repeat(header.len()));
+
+    let mean = |v: &[f64]| {
+        if v.is_empty() {
+            f64::NAN
+        } else {
+            v.iter().sum::<f64>() / v.len() as f64
+        }
+    };
+    let rho_mean = mean(&rhos);
+    let control_mean = mean(&controls);
+    println!(
+        "{:<46} {rho_mean:>8.3} {:>9} {:>9} {shared_total:>10}",
+        "mean", "", ""
+    );
+    println!(
+        "{:<46} {control_mean:>8.3} {:>9} {:>9} {control_shared:>10}   <- control",
+        "lexical vs random draw", "", ""
+    );
+    println!();
+
+    // Overlap is the statistic that survives the convention. rho above ranks
+    // absent items worst, so two mostly-disjoint lists correlate negatively
+    // whatever order they are in — which is why the control is drawn the same
+    // way rather than compared against zero.
+    let probes = corpus.probes.len().max(1);
+    let expected = (K * K) as f64 / runtime.graph.len().max(1) as f64;
+    let observed = shared_total as f64 / probes as f64;
+    println!("Agreement, per probe, top-{K} of {} nodes:", runtime.graph.len());
+    println!("  shared by both channels     : {observed:.1}");
+    println!("  expected if independent     : {expected:.1}  (K^2 / N)");
+    println!("  control, measured           : {:.1}", control_shared as f64 / probes as f64);
+    println!(
+        "  ratio, observed to expected : {:.1}x",
+        observed / expected.max(f64::EPSILON)
+    );
+    println!();
+    println!(
+        "How to read this. rho is reported against the control and not against zero:\n\
+         ranking absent items worst makes any two mostly-disjoint lists correlate\n\
+         negatively regardless of order, so the number carries the convention as much\n\
+         as the data. The load-bearing figure is the overlap ratio.\n\n\
+         The channels agree more than chance and much less than the documentation\n\
+         implies. 'Correlated rather than independent evidence' is directionally\n\
+         right and overstated as written: {only_one} of {} ranked positions across the\n\
+         probe set were surfaced by exactly one channel.\n\n\
+         What this does not measure: paraphrase. The standard seven probes were\n\
+         written to be answerable by vocabulary overlap, which is the condition\n\
+         under which the two channels are most likely to agree. A paraphrase probe\n\
+         set is the measurement still missing, and it is the one the poor-fit entry\n\
+         actually rests on.",
+        only_one + shared_total
     );
     Ok(())
 }

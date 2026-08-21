@@ -20,7 +20,7 @@
 
 use std::cell::Cell;
 
-use crate::embed::{DIM, cosine, hashing_embed};
+use crate::embed::{Embedder, HashingEmbedder, cosine};
 use crate::nodes::{Kind, L0Sizes, Node, Origin, Status};
 use crate::spans::RawStore;
 use crate::summarize::ExtractiveSummarizer;
@@ -85,7 +85,9 @@ impl std::fmt::Display for Builds {
 pub struct Ladder {
     pub summarizer: ExtractiveSummarizer,
     pub estimator: Estimator,
-    pub dim: usize,
+    /// How text becomes a vector. Swap this to change the vector channel; the
+    /// default is the bundled 256-dimensional hashing embedder.
+    pub embedder: Box<dyn Embedder>,
     /// Collapse the ladder to a single level - the ablation that asks what the
     /// other three levels are actually buying.
     pub flatten_to_l2: bool,
@@ -112,7 +114,7 @@ impl Default for Ladder {
         Self {
             summarizer: ExtractiveSummarizer::default(),
             estimator: Estimator::default(),
-            dim: DIM,
+            embedder: Box::new(HashingEmbedder::default()),
             flatten_to_l2: false,
             l0_builds: Cell::new(0),
             l0_build_spans: Cell::new(0),
@@ -237,7 +239,7 @@ impl Ladder {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
-        let built = hashing_embed(&basis, self.dim);
+        let built = self.embedder.embed(&basis);
         node.level_cache.borrow_mut().l2 = Some(built.clone());
         self.note_build(Level::L2);
         built
@@ -348,7 +350,7 @@ impl Ladder {
     }
 
     pub fn query_vector(&self, query: &str) -> Vec<f32> {
-        hashing_embed(query, self.dim)
+        self.embedder.embed(query)
     }
 
     /// Speculative materialisation. Costs storage/compute budget, never

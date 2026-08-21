@@ -90,10 +90,38 @@ objective for you.
 ### Semantic search over paraphrase
 
 The bundled embedder is a 256-dimensional hashing embedding, not a learned one.
-It finds material sharing vocabulary, and the lexical and vector channels are
-therefore correlated rather than independent evidence. Genuine paraphrase
-retrieval needs a real embedding model swapped in; the interface accepts any
-`str -> Vec<f32>`.
+It finds material sharing vocabulary. This entry used to add that the lexical
+and vector channels are "correlated rather than independent evidence", which was
+asserted and never measured. `bench --channels` measures it.
+
+On the standard corpus, top-20 per channel over 298 nodes: the channels share
+**3.6 nodes per probe against 1.3 expected if independent** — 2.7x chance, so
+they are genuinely dependent — while **195 of 220 ranked positions were surfaced
+by exactly one channel**. Directionally the old sentence was right and as
+written it was overstated: the channels agree more than chance and far less than
+"correlated rather than independent" implies.
+
+Read the rank correlation in that table against its control rather than against
+zero. Ranking absent items worst makes any two mostly-disjoint lists correlate
+negatively whatever order they are in, so the control is a pseudo-random draw of
+the same size from the same node population — same disjointness, not just the
+same length. Measured rho is -0.24 against a control of -0.80.
+
+**What none of this measures is paraphrase.** The standard seven probes were
+written to be answerable by vocabulary overlap, which is the condition under
+which these two channels most agree. A paraphrase probe set is the measurement
+this entry actually rests on and it does not exist yet, so the poor fit stands
+on the design of the embedder rather than on evidence.
+
+Swapping in a real embedding model is now a constructor argument rather than a
+patch. `Ladder::embedder` takes any `dyn Embedder` — see
+[`examples/custom_embedder.rs`](https://github.com/s-b-repo/subnext/blob/main/examples/custom_embedder.rs).
+The claim that "the interface accepts any `str -> Vec<f32>`" predated the
+interface; `Ladder` called the hashing embedder directly until now.
+
+Note what a learned embedder costs here: the runtime stops being offline and
+deterministic, and every figure in [RESULTS](../RESULTS.md) would need
+re-measuring against the new channel rather than inherited.
 
 ### ~~Reasoners that cannot signal~~ — retracted
 

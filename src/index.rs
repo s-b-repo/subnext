@@ -375,6 +375,26 @@ impl HybridIndex {
         rank(combined.into_iter().collect(), k)
     }
 
+    /// Both channels' rankings, unfused.
+    ///
+    /// `search` blends these and returns one list, which makes it impossible to
+    /// ask how much the two channels *disagree* — and the docs claim they are
+    /// "correlated rather than independent evidence" without ever having
+    /// measured it. This returns them separately so `bench --channels` can.
+    pub fn channels(
+        &self,
+        namespace: Namespace,
+        query: &str,
+        query_vec: &[f32],
+        k: usize,
+    ) -> (Vec<(usize, f32)>, Vec<(usize, f32)>) {
+        let (lexical, vector) = match namespace {
+            Namespace::Node => (&self.node_lexical, &self.node_vector),
+            Namespace::Span => (&self.span_lexical, &self.span_vector),
+        };
+        (lexical.search(query, k), vector.search(query_vec, k))
+    }
+
     /// Score every vector instead of pruning, on both node and span stores.
     /// Present so the exact and approximate paths can be measured against each
     /// other on the same corpus.
