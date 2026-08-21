@@ -46,7 +46,8 @@ unclear where the quality cliff is.
 ## 9. Is `O(k + r)` real?
 It holds only if `k`, `r`, and retrieval cost all stay bounded. Adversarial tasks (every turn
 needs new distant evidence) degrade toward O(N). Sub-linear retrieval has since landed (LSH
-pruning removes ~96% of scored vectors) and end-to-end latency *still* grows, so the binding
+pruning removes ~96% of scored vectors, at 54.8% recall@12 against the exact scan at 3,000
+turns) and end-to-end latency *still* grows, so the binding
 constraint was never only retrieval — the planner's own cost has not been shown sub-linear
 either. The attention term is established; the end-to-end term is not.
 

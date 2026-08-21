@@ -68,7 +68,12 @@ tamper-*evident*, not tamper-proof, and
 state nodes. That is a different cost structure from feeding a long window, and
 unlike a sliding window it does not lose old material permanently — a fact
 outside a window is unrecoverable at any model quality, while a fact outside the
-current working set is one plan away.
+current working set is one plan away. That counts *assembled* tokens and not
+billable ones. Re-planning every turn produces a different context every turn, so
+consecutive contexts share only a 6-token header — `bench --cache` measures the
+cacheable prefix at **1.0%**, 36 of 3,504 tokens. A cache-friendly assembler
+sending *more* tokens could be cheaper per turn under a provider that discounts
+cached prefixes, and that comparison has not been run.
 
 ---
 
@@ -176,6 +181,19 @@ a query scores and takes the index call to a fraction of a millisecond — a
 figure measured on the *standard* corpus, which emits 21 distinct documents at
 any size, so it does not separate "pruned vectors" from "pruned near-duplicates"
 and should not be read as though it did.
+
+Pruning that much is not free, and the report used to defend it with
+"correctness is identical on both paths" — which is seven probes agreeing on an
+answer, not the two paths retrieving the same material. `bench --recall` measures
+the stronger statement: top-12 overlap with the exact scan is 100% at 300 turns,
+58.3% at 1,000, and **54.8% at 3,000**, with correctness unchanged at 7/7 and
+top-1 matching on 6 of 7. Well-tuned approximate indices are usually quoted at
+85-95%.
+
+Tuning it made it worse in a way worth knowing: doubling the table count drops
+recall to 39.3%, because larger candidate sets trip the exact-scan fallback less
+often — so part of the 54.8% is the approximate path giving up and doing the
+exact thing rather than LSH succeeding. Left at 8 tables and reported.
 
 The cost was in the planner, and `bench --stages` now says where. Each stage has
 its own clock and publishes what it rejected, an instrument proposed by

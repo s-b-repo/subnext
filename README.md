@@ -153,7 +153,12 @@ afterwards". Without a signer this is tamper-*evident*, not tamper-proof.
 **Cost-sensitive deployments over large histories.** 4.19 million tokens of
 history answered from 235 tokens per query is a different cost structure from
 feeding a long window, and it does not degrade with history length in the way a
-sliding window does.
+sliding window does. That counts *assembled* tokens and not
+billable ones. Re-planning every turn produces a different context every turn, so
+consecutive contexts share only a 6-token header — `bench --cache` measures the
+cacheable prefix at **1.0%**, 36 of 3,504 tokens. A cache-friendly assembler
+sending *more* tokens could be cheaper per turn under a provider that discounts
+cached prefixes, and that comparison has not been run.
 
 ### Poor fits
 
@@ -193,7 +198,11 @@ the strength of these numbers.
 
 **Very large N where planning cost matters.** Retrieval is not the bottleneck —
 an LSH index prunes ~96% of scored vectors, on the corpus with 21 distinct
-documents, which does not separate pruned vectors from pruned duplicates. The
+documents, which does not separate pruned vectors from pruned duplicates.
+`bench --recall` prices that pruning: top-12 overlap with the exact scan is
+**54.8% at 3,000 turns** (100% at 300), correctness unchanged at 7/7. Doubling
+the tables makes recall *worse*, not better, because larger candidate sets trip
+the exact-scan fallback less often. The
 cost was in the planner, and `bench --stages` now clocks each stage separately
 and publishes what it rejected. Scoring dominated and grew with history despite a
 candidate set capped at 120: `available()` and `cost()` each concatenated a
@@ -237,6 +246,8 @@ cargo run --release -- bench --coverage   # how much of the store is ever read b
 cargo run --release -- bench --poison     # positive control: can the stale metric fire?
 cargo run --release -- bench --decay      # does a recency prefilter cost recall?
 cargo run --release -- bench --consolidate # a write landing mid-turn
+cargo run --release -- bench --cache      # how much of the assembled context is a cacheable prefix?
+cargo run --release -- bench --recall     # what does the approximate index actually miss?
 ```
 
 The PDF and the web version are both generated from `paper/paper.frag.html` by
