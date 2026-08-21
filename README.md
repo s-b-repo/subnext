@@ -248,6 +248,7 @@ cargo run --release -- bench --decay      # does a recency prefilter cost recall
 cargo run --release -- bench --consolidate # a write landing mid-turn
 cargo run --release -- bench --cache      # how much of the assembled context is a cacheable prefix?
 cargo run --release -- bench --recall     # what does the approximate index actually miss?
+cargo run --release -- bench --fusion     # rank fusion, and what the seed floor is buying
 ```
 
 The PDF and the web version are both generated from `paper/paper.frag.html` by

@@ -8,7 +8,7 @@ cargo run --release -- bench --baselines            # DCR vs RAG / summarize / r
 cargo run --release -- bench --scaling --budget 800 # the flat-k table
 cargo run --release -- bench --rebuild              # what does a workspace rebuild cost?
 cargo run --release -- bench --tamper               # can the container detect tampering?
-cargo test                                          # 152 tests, ~14s
+cargo test                                          # 164 tests, ~14s
 ```
 
 Every benchmark is deterministic and offline. No API key, no network.

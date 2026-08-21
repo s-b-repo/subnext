@@ -598,9 +598,11 @@ this design, which is the reason to run it.
 all candidates — a fixed split cannot trade a cheap summary against an expensive
 quote when the query needs the quote. Their substrate/projection separation is
 this design's two-system split under different names, and their hierarchical
-summarisation is the representation ladder. Reciprocal rank fusion instead of
-the current linear lexical/vector blend is untested and worth trying, given the
-two channels here are already known to be correlated rather than independent.
+summarisation is the representation ladder. Reciprocal rank fusion is now **built and measured** (`Fusion::Rrf`, off by
+default, `bench --fusion`) rather than proposed. It buys nothing here, which the
+channel measurement predicted: RRF rewards agreement between channels and 195 of
+220 ranked positions on this corpus come from exactly one channel. See item 20 —
+the comparison was more useful for what it exposed than for its own result.
 
 ---
 
@@ -648,6 +650,43 @@ open.
 **Also unmodelled:** positional attention bias. The knapsack decides *what* to
 admit and nothing decides *where* it goes in the rendered context. If mid-context
 material is attended less, ordering is a free variable being left to chance.
+
+---
+
+## 20. The seed floor is load-bearing, and the standard probe set cannot referee it
+
+Found while measuring rank fusion, and more important than rank fusion.
+
+Sweeping `seed_min_ratio` on the standard corpus produces a very attractive
+result: **0.3 → 0.5 cuts the working set from 461.9 tokens to 145.1 and all seven
+probes still answer correctly.** A 3x saving for nothing, on the default fusion,
+with no new mechanism.
+
+It is not for nothing. On the adversarial mutation set — where the superseded
+value is the *closer* lexical match, so a thin context answers with it — the same
+change takes correction-following from **4/4 to 1/4 and serves the stale value on
+3 of 4 queries**. At 0.7 it is 0/4.
+
+Two things follow.
+
+**The default is load-bearing, not loose.** `seed_min_ratio = 0.3` is buying the
+correction path. Nothing about it changed and nothing should change without a
+probe set that can see what it costs.
+
+**Seven probes at 7/7 across a 3x range of working-set size is a probe set that
+cannot referee its own configuration.** Tuning against it would have shipped a
+headline token figure and a broken correction path, both green — the same defect
+this project keeps finding in its own instruments, arriving this time as an
+*improvement* rather than as a bug. That is the harder direction to catch,
+because nobody audits a number that got better.
+
+**Open:** the standard probes are the referee for most published figures, and
+this is direct evidence they under-discriminate. Every knob measured only against
+them inherits the problem. The fix is not a better floor, it is probes that
+separate configurations the current seven cannot — the mutation set does it for
+corrections, and nothing plays that role for coverage, ordering or escalation.
+
+---
 
 ---
 
