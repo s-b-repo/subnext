@@ -166,7 +166,7 @@ Same probes, same `B_attention = 800`, history scaled 33x:
 
 ### The range this table covers, and the range it does not
 
-The standard corpus emits **21 distinct documents at any size** — ten fixed documents, three corrections and eight noise templates, countable in `build_corpus` and `NOISE`. Growing it grows
+The standard corpus emits **21 distinct documents at any size** — ten fixed documents, three corrections and eight noise templates. Confirm it by running the generator and grouping its output rather than by reading the source: 13 shapes occur once and 8 repeat, at 300 turns and at 30,000 alike. Growing it grows
 the transcript's *length* at fixed lexical *variety* — at 3,000 turns each of its
 eight distractor templates already appears 373 times. Flat `k` here shows the
 planner does not degrade with length at constant difficulty. It is not evidence
