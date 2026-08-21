@@ -190,9 +190,15 @@ not established.
 ### If you are evaluating it
 
 Run `bench --ablate` first. It reports which mechanisms carry which probes,
-including two that carry nothing on the standard corpus, and it will tell you
-faster than the prose whether the parts you care about are doing work on a
-workload like yours.
+including two that carry nothing on the standard corpus. It measures *those*
+probes on *that* corpus — your workload is the thing it does not measure — but it
+is the cheapest thing here to re-run against your own material, which is the only
+way to answer the question for you.
+
+If you are sizing any benchmark, the check that separates length from difficulty
+costs one line: **does the count of distinct documents grow with N, or only the
+token count?** That is how the problem was found here — by counting what the
+generator emitted, not by reasoning about it.
 
 ## Paper
 

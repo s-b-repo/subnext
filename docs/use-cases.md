@@ -132,9 +132,17 @@ cargo run --release -- bench --ablate
 
 It reports which mechanisms carry which probes, **including two that carry
 nothing on the standard corpus**, and it will tell you faster than any prose
-whether the parts you care about are doing work on a workload like yours.
+whether the parts you care about are doing work on *these* probes, on *that*
+corpus. Your workload is precisely the thing it does not measure — but it is
+also the cheapest thing here to re-run against your own material, which is the
+only way to answer the question for you.
 
 Then run `bench --diverse` if your histories are large, and read the note under
 it: the standard corpus emits 21 distinct documents at any size, so a large-token
-figure from it measures length rather than difficulty. That distinction is worth
-importing into your own benchmarking whether or not you use this system.
+figure from it measures length rather than difficulty.
+
+The check that separates the two costs one line — **does the count of distinct
+documents grow with N, or only the token count?** — and is worth running on any
+corpus whose size is part of the claim, including ones that have nothing to do
+with this system. That is how the problem was found here: not by reasoning about
+the generator, but by counting what it emitted.
