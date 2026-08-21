@@ -2273,3 +2273,117 @@ pub fn run_scaling_diverse(sizes: &[usize], budget: usize) -> Result<(), DcrErro
     );
     Ok(())
 }
+
+/// Per-stage planner clocks and rejection counts across a scaling sweep.
+///
+/// Proposed by [@cwahq](https://www.moltbook.com/post/78237a57-17ef-4c78-b05f-8c1e5a944196):
+/// *"split candidate generation, scoring, and graph expansion into separate
+/// clocks, then publish the rejected-candidate count at each stage."*
+///
+/// Every latency number this repo published before this existed was taken at
+/// the outer edge of a turn, so "planning" was the residual left after
+/// retrieval rather than a measured quantity. That is the reason the previous
+/// diagnosis ("the vector index is a linear scan") was confidently wrong: the
+/// cost was in a stage with no clock on it.
+pub fn run_stages(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
+    println!("PLANNER STAGES - standard corpus, B_attention = {budget}, per query");
+    println!();
+    let header = format!(
+        "{:>7} {:>7} {:>10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>12}",
+        "turns", "nodes", "plan us", "seed", "expand", "pin", "score", "knap", "admit", "spans/q"
+    );
+    println!("{header}");
+    println!("{}", "-".repeat(header.len()));
+
+    let mut rows: Vec<(usize, usize, crate::planner::StageProfile, u64)> = Vec::new();
+    for &turns in sizes {
+        let corpus = build_corpus(turns);
+        let mut runtime = Dcr::new(budget);
+        for (doc_id, text) in &corpus.docs {
+            runtime.ingest(text, Some(doc_id))?;
+        }
+        // Planning only: the accumulator is reset after ingest so the table
+        // prices the read path, not the writes that built the store.
+        runtime.planning = crate::planner::StageProfile::default();
+        runtime.plans = 0;
+        let mut reasoner = LocalReasoner::new();
+        for probe in &corpus.probes {
+            let _ = runtime.ask_with(probe.query, None, &mut reasoner);
+        }
+        let plans = runtime.plans.max(1);
+        let p = runtime.planning;
+        let per = |d: std::time::Duration| d.as_secs_f64() * 1e6 / plans as f64;
+        println!(
+            "{turns:>7} {:>7} {:>10.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>12.0}",
+            runtime.graph.len(),
+            per(p.total()),
+            per(p.seed_time),
+            per(p.expand_time),
+            per(p.pin_time),
+            per(p.score_time),
+            per(p.knapsack_time),
+            per(p.admit_time),
+            p.score_spans_priced as f64 / plans as f64,
+        );
+        rows.push((turns, runtime.graph.len(), p, plans));
+    }
+
+    println!();
+    println!("Candidates rejected per query, by the stage that rejected them:");
+    println!();
+    let rej_header = format!(
+        "{:>7} {:>11} {:>13} {:>12} {:>13} {:>10} {:>16} {:>11} {:>16}",
+        "turns", "seed:floor", "seed:status", "seed:kept", "pin:added", "score:cap",
+        "score:superseded", "knap:drop", "expand cap bound"
+    );
+    println!("{rej_header}");
+    println!("{}", "-".repeat(rej_header.len()));
+    for (turns, _, p, plans) in &rows {
+        let per = |v: usize| v as f64 / *plans as f64;
+        println!(
+            "{turns:>7} {:>11.1} {:>13.1} {:>12.1} {:>13.1} {:>10.1} {:>16.1} {:>11.1} {:>16}",
+            per(p.seed_dropped_floor),
+            per(p.seed_dropped_status),
+            per(p.seeds_kept),
+            per(p.pinned_added),
+            per(p.score_dropped_cap),
+            per(p.score_dropped_superseded),
+            per(p.knapsack_dropped),
+            if p.expand_capped { "yes" } else { "no" },
+        );
+    }
+
+    println!();
+    if let (Some(first), Some(last)) = (rows.first(), rows.last()) {
+        let growth = |f: fn(&crate::planner::StageProfile) -> std::time::Duration| {
+            let a = f(&first.2).as_secs_f64() / first.3 as f64;
+            let b = f(&last.2).as_secs_f64() / last.3 as f64;
+            if a > 0.0 { b / a } else { f64::NAN }
+        };
+        println!(
+            "Growth {}x turns ({} -> {} nodes): total {:.1}x, seed {:.1}x, expand {:.1}x, \
+             pin {:.1}x, score {:.1}x, knapsack {:.1}x",
+            last.0 / first.0.max(1),
+            first.1,
+            last.1,
+            growth(|p| p.total()),
+            growth(|p| p.seed_time),
+            growth(|p| p.expand_time),
+            growth(|p| p.pin_time),
+            growth(|p| p.score_time),
+            growth(|p| p.knapsack_time),
+        );
+        println!(
+            "Nodes grew {:.1}x; nodes visited by the pin stage per query grew {:.1}x.",
+            last.1 as f64 / first.1.max(1) as f64,
+            (last.2.pin_scanned as f64 / last.3 as f64)
+                / (first.2.pin_scanned as f64 / first.3.max(1) as f64).max(1.0),
+        );
+    }
+    println!();
+    println!(
+        "Timings are single-run on one machine and carry the spread every other timing\n\
+         here carries; reproduce the ordering between stages, not the microseconds."
+    );
+    Ok(())
+}

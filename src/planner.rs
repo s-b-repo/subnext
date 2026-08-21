@@ -205,11 +205,60 @@ pub struct StageProfile {
     pub score_dropped_superseded: usize,
     pub score_dropped_stale: usize,
     pub score_dropped_no_level: usize,
+    /// Source spans concatenated while pricing the candidates of one plan.
+    ///
+    /// `Ladder::available` renders `raw_text` — every source span of the node,
+    /// joined — just to ask whether the text exceeds 40 tokens. Corroboration
+    /// collapses agreeing spans behind one node, so a node's span list grows
+    /// with history, and this counter is what shows the scoring stage doing
+    /// work linear in N over a candidate set that is capped at 120.
+    pub score_spans_priced: usize,
 
     // -- knapsack ----------------------------------------------------------
     pub knapsack_candidates: usize,
     pub knapsack_dropped: usize,
     pub knapsack_demoted: usize,
+
+    /// Rendering the admitted set after the knapsack has chosen it.
+    ///
+    /// This stage had no clock in the first version of this struct, which is
+    /// the exact failure the struct exists to prevent.
+    pub admit_time: Duration,
+    pub admitted: usize,
+}
+
+impl std::ops::AddAssign for StageProfile {
+    /// Sum stage costs across the re-plans of one turn, or across a whole run.
+    /// `expand_capped` is a disjunction: the cap bound at least once.
+    fn add_assign(&mut self, rhs: Self) {
+        self.seed_time += rhs.seed_time;
+        self.expand_time += rhs.expand_time;
+        self.pin_time += rhs.pin_time;
+        self.score_time += rhs.score_time;
+        self.knapsack_time += rhs.knapsack_time;
+        self.speculate_time += rhs.speculate_time;
+        self.seed_hits += rhs.seed_hits;
+        self.seed_dropped_floor += rhs.seed_dropped_floor;
+        self.seed_dropped_recency += rhs.seed_dropped_recency;
+        self.seed_dropped_status += rhs.seed_dropped_status;
+        self.seed_from_spans += rhs.seed_from_spans;
+        self.seeds_kept += rhs.seeds_kept;
+        self.expand_reached += rhs.expand_reached;
+        self.expand_capped |= rhs.expand_capped;
+        self.pinned_added += rhs.pinned_added;
+        self.pin_scanned += rhs.pin_scanned;
+        self.score_considered += rhs.score_considered;
+        self.score_dropped_cap += rhs.score_dropped_cap;
+        self.score_dropped_superseded += rhs.score_dropped_superseded;
+        self.score_dropped_stale += rhs.score_dropped_stale;
+        self.score_dropped_no_level += rhs.score_dropped_no_level;
+        self.knapsack_candidates += rhs.knapsack_candidates;
+        self.knapsack_dropped += rhs.knapsack_dropped;
+        self.knapsack_demoted += rhs.knapsack_demoted;
+        self.score_spans_priced += rhs.score_spans_priced;
+        self.admit_time += rhs.admit_time;
+        self.admitted += rhs.admitted;
+    }
 }
 
 impl StageProfile {
@@ -221,16 +270,18 @@ impl StageProfile {
             + self.pin_time
             + self.score_time
             + self.knapsack_time
+            + self.admit_time
             + self.speculate_time
     }
 
-    pub fn clocks(&self) -> [(&'static str, Duration); 6] {
+    pub fn clocks(&self) -> [(&'static str, Duration); 7] {
         [
             ("seed", self.seed_time),
             ("expand", self.expand_time),
             ("pin", self.pin_time),
             ("score", self.score_time),
             ("knapsack", self.knapsack_time),
+            ("admit", self.admit_time),
             ("speculate", self.speculate_time),
         ]
     }
@@ -462,6 +513,7 @@ impl RelevancePlanner {
         for &(idx, distance) in distances.iter().take(self.max_candidates) {
             active.profile.score_considered += 1;
             let node = ctx.graph.node(idx);
+            active.profile.score_spans_priced += node.source_spans.len();
             if node.status == Status::Superseded {
                 active.profile.score_dropped_superseded += 1;
                 continue;
@@ -518,6 +570,7 @@ impl RelevancePlanner {
         let allocation = solve(&candidates, budget, None, &preferred);
         active.profile.knapsack_time = clock.elapsed();
 
+        let clock = Instant::now();
         let mut chosen: Vec<(NodeIdx, Choice)> = allocation.chosen.into_iter().collect();
         chosen.sort_by_key(|(idx, _)| *idx);
         for (idx, option) in chosen {
@@ -545,6 +598,9 @@ impl RelevancePlanner {
                 terms,
             });
         }
+        active.profile.admit_time = clock.elapsed();
+        active.profile.admitted = active.entries.len();
+
         active.tokens = allocation.tokens;
         active.dropped = allocation.dropped;
         active.demoted = allocation.demoted;

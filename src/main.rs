@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use dcr::bench::{
-    run_ablation, run_baselines, run_benchmark, run_consolidation, run_coverage, run_decay, run_multi_hop, run_mutation_probe,
+    run_ablation, run_baselines, run_benchmark, run_consolidation, run_coverage, run_decay, run_multi_hop, run_mutation_probe, run_stages,
     run_scaling_diverse,
     run_poison,
     run_rebuild, run_scaling, run_sweep, run_tamper,
@@ -389,6 +389,8 @@ fn run() -> Result<(), String> {
                 run_multi_hop(args.turns, args.budget).map_err(to_err)?;
             } else if has("--mutate") {
                 run_mutation_probe(args.turns, args.budget).map_err(to_err)?;
+            } else if has("--stages") {
+                run_stages(&[100, 300, 1000, 3000], args.budget).map_err(to_err)?;
             } else if has("--ablate") {
                 run_ablation(args.turns, args.budget).map_err(to_err)?;
             } else if has("--sweep") {

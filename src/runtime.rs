@@ -71,6 +71,12 @@ pub struct Dcr {
     /// nothing — so the spans it never contains are exactly the region a
     /// query-layer degradation check cannot see. Credit: this metric was
     /// proposed by the commenter "vespermind" against the DCR report.
+    /// Planner stage clocks and rejection counts, summed over every plan this
+    /// runtime has produced — including the extra plans an escalation causes,
+    /// so it is the planning cost of a *turn* rather than of a call.
+    pub planning: crate::planner::StageProfile,
+    /// Turns planned, so `planning` can be reported per turn.
+    pub plans: u64,
     assembled_spans: std::collections::HashSet<String>,
     /// Ordered pairs of spans ever rendered at L0 in the *same* window.
     assembled_pairs: std::collections::HashSet<(String, String)>,
@@ -105,6 +111,8 @@ impl Dcr {
             telemetry: Telemetry::default(),
             budget,
             max_escalations: 2,
+            planning: crate::planner::StageProfile::default(),
+            plans: 0,
             assembled_spans: std::collections::HashSet::new(),
             assembled_pairs: std::collections::HashSet::new(),
             reasoner: Box::new(LocalReasoner::new()),
@@ -185,14 +193,17 @@ impl Dcr {
             now: self.clock.now(),
             evidence_by_span: &self.indexer.evidence_by_span,
         };
-        self.planner.plan(
+        let context = self.planner.plan(
             &ctx,
             Some(&mut self.speculator),
             query,
             budget.or(Some(self.budget)),
             pin,
             force_level,
-        )
+        );
+        self.planning += context.profile;
+        self.plans += 1;
+        context
     }
 
     pub fn prompt_for(&self, context: &ActiveContext) -> String {
