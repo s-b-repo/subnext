@@ -18,6 +18,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
 
 use crate::budget::{Candidate, Choice, solve};
 use crate::graph::MemoryGraph;
@@ -151,6 +152,104 @@ impl UtilityTerms {
     }
 }
 
+/// Per-stage clocks and rejection counts for one plan.
+///
+/// Proposed by [@cwahq](https://www.moltbook.com/post/78237a57-17ef-4c78-b05f-8c1e5a944196):
+/// *"split candidate generation, scoring, and graph expansion into separate
+/// clocks, then publish the rejected-candidate count at each stage… 'planning'
+/// is still too broad to own the cost."*
+///
+/// Every latency figure this repo published before this struct existed was
+/// taken at the outer edge of a turn, which makes planning a *residual* rather
+/// than a measurement. A stage with no clock can absorb any amount of the
+/// budget and never appear in a table, and the failure mode is not that it is
+/// slow — it is that the table then reads as complete.
+///
+/// The rejection counts are the same argument at the correctness layer. A stage
+/// that discards candidates without publishing how many is unfalsifiable in the
+/// way `stale_fact_read_rate: 0.0` was: nothing about it can fail.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StageProfile {
+    // -- clocks ------------------------------------------------------------
+    pub seed_time: Duration,
+    pub expand_time: Duration,
+    pub pin_time: Duration,
+    pub score_time: Duration,
+    pub knapsack_time: Duration,
+    pub speculate_time: Duration,
+
+    // -- seed --------------------------------------------------------------
+    /// Hits the index returned before any of this stage's filters ran.
+    pub seed_hits: usize,
+    pub seed_dropped_floor: usize,
+    pub seed_dropped_recency: usize,
+    pub seed_dropped_status: usize,
+    pub seed_from_spans: usize,
+    pub seeds_kept: usize,
+
+    // -- expand ------------------------------------------------------------
+    pub expand_reached: usize,
+    /// `max_candidates` stopped the BFS early. If this is true at large N then
+    /// "planning cost grows with N" and "the cap is silently truncating" are
+    /// the same observation, and only one of them is a latency problem.
+    pub expand_capped: bool,
+
+    // -- pin ---------------------------------------------------------------
+    pub pinned_added: usize,
+    /// Nodes `by_kind` visited to find them. Uncapped and linear in the graph.
+    pub pin_scanned: usize,
+
+    // -- score -------------------------------------------------------------
+    pub score_considered: usize,
+    pub score_dropped_cap: usize,
+    pub score_dropped_superseded: usize,
+    pub score_dropped_stale: usize,
+    pub score_dropped_no_level: usize,
+
+    // -- knapsack ----------------------------------------------------------
+    pub knapsack_candidates: usize,
+    pub knapsack_dropped: usize,
+    pub knapsack_demoted: usize,
+}
+
+impl StageProfile {
+    /// Total time inside the planner. Named `planning` everywhere it is
+    /// reported, so the residual can finally be checked against a sum.
+    pub fn total(&self) -> Duration {
+        self.seed_time
+            + self.expand_time
+            + self.pin_time
+            + self.score_time
+            + self.knapsack_time
+            + self.speculate_time
+    }
+
+    pub fn clocks(&self) -> [(&'static str, Duration); 6] {
+        [
+            ("seed", self.seed_time),
+            ("expand", self.expand_time),
+            ("pin", self.pin_time),
+            ("score", self.score_time),
+            ("knapsack", self.knapsack_time),
+            ("speculate", self.speculate_time),
+        ]
+    }
+
+    /// Candidates discarded per stage, in pipeline order.
+    pub fn rejections(&self) -> [(&'static str, usize); 8] {
+        [
+            ("seed:floor", self.seed_dropped_floor),
+            ("seed:recency", self.seed_dropped_recency),
+            ("seed:status", self.seed_dropped_status),
+            ("expand:capped", usize::from(self.expand_capped)),
+            ("score:cap", self.score_dropped_cap),
+            ("score:superseded", self.score_dropped_superseded),
+            ("score:stale", self.score_dropped_stale),
+            ("knapsack:dropped", self.knapsack_dropped),
+        ]
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Admission {
     pub node: NodeIdx,
@@ -183,6 +282,8 @@ pub struct ActiveContext {
     pub explain_paths: Vec<(NodeIdx, Vec<NodeIdx>)>,
     pub stale_seen: Vec<NodeIdx>,
     pub overflow: bool,
+    /// Per-stage clocks and rejection counts. See [`StageProfile`].
+    pub profile: StageProfile,
 }
 
 impl ActiveContext {
@@ -335,25 +436,44 @@ impl RelevancePlanner {
         };
 
         let query_vec = ctx.ladder.query_vector(query);
+
+        let clock = Instant::now();
         let seeds = self.seed(ctx, query, &query_vec, &mut active);
+        active.profile.seed_time = clock.elapsed();
+        active.profile.seeds_kept = seeds.len();
+
         let seed_scores: HashMap<NodeIdx, f32> = seeds.iter().copied().collect();
+
+        let clock = Instant::now();
         let mut distances = self.expand(ctx, &seeds, qtype, pin, &mut active);
-        let pinned = self.pinned(ctx, qtype, &mut distances, pin);
+        active.profile.expand_time = clock.elapsed();
+        active.profile.expand_reached = distances.len();
+
+        let clock = Instant::now();
+        let pinned = self.pinned(ctx, qtype, &mut distances, pin, &mut active.profile);
+        active.profile.pin_time = clock.elapsed();
+
+        let clock = Instant::now();
+        active.profile.score_dropped_cap = distances.len().saturating_sub(self.max_candidates);
         let mut candidates: Vec<Candidate> = Vec::new();
         let mut preferred: HashMap<NodeIdx, Level> = HashMap::new();
         let mut scratch: HashMap<NodeIdx, (UtilityTerms, Level)> = HashMap::new();
 
         for &(idx, distance) in distances.iter().take(self.max_candidates) {
+            active.profile.score_considered += 1;
             let node = ctx.graph.node(idx);
             if node.status == Status::Superseded {
+                active.profile.score_dropped_superseded += 1;
                 continue;
             }
             if node.status == Status::Stale && !pinned.contains(&idx) && !self.admit_stale {
+                active.profile.score_dropped_stale += 1;
                 active.stale_seen.push(idx);
                 continue;
             }
             let available = ctx.ladder.available(ctx.raw, node);
             if available.is_empty() {
+                active.profile.score_dropped_no_level += 1;
                 continue;
             }
             let want = force_level
@@ -383,14 +503,20 @@ impl RelevancePlanner {
                 ));
             }
             if options.is_empty() {
+                active.profile.score_dropped_no_level += 1;
                 continue;
             }
             candidates.push(Candidate::new(idx, options, pinned.contains(&idx)));
             scratch.insert(idx, (terms, want));
         }
 
+        active.profile.score_time = clock.elapsed();
+
         active.considered = candidates.len();
+        active.profile.knapsack_candidates = candidates.len();
+        let clock = Instant::now();
         let allocation = solve(&candidates, budget, None, &preferred);
+        active.profile.knapsack_time = clock.elapsed();
 
         let mut chosen: Vec<(NodeIdx, Choice)> = allocation.chosen.into_iter().collect();
         chosen.sort_by_key(|(idx, _)| *idx);
@@ -423,9 +549,13 @@ impl RelevancePlanner {
         active.dropped = allocation.dropped;
         active.demoted = allocation.demoted;
         active.overflow = allocation.overflow;
+        active.profile.knapsack_dropped = active.dropped.len();
+        active.profile.knapsack_demoted = active.demoted.len();
 
         if let Some(speculator) = speculator {
+            let clock = Instant::now();
             self.speculate(ctx, speculator, &distances, &query_vec, &active);
+            active.profile.speculate_time = clock.elapsed();
         }
         active
     }
@@ -441,9 +571,12 @@ impl RelevancePlanner {
         let mut hits = ctx
             .index
             .search(Namespace::Node, query, query_vec, self.seed_k);
+        active.profile.seed_hits = hits.len();
         if let Some((_, top)) = hits.first().copied() {
             let floor = top * self.seed_min_ratio;
+            let before = hits.len();
             hits.retain(|(_, score)| *score >= floor);
+            active.profile.seed_dropped_floor = before - hits.len();
         }
         let mut seeds: Vec<(NodeIdx, f32)> = Vec::new();
         // Recency prefilter, off by default. Applied before scoring so it is a
@@ -464,6 +597,7 @@ impl RelevancePlanner {
             let node = ctx.graph.node(idx);
             if let Some(floor) = age_floor {
                 if node.timestamp < floor {
+                    active.profile.seed_dropped_recency += 1;
                     continue;
                 }
             }
@@ -478,18 +612,28 @@ impl RelevancePlanner {
             // deliberately left in — it still supports live facts, so its note
             // has to do the work.
             if node.meta.superseded_source && !self.admit_stale {
+                active.profile.seed_dropped_status += 1;
                 active.stale_seen.push(idx);
                 continue;
             }
             match node.status {
-                Status::Superseded => continue,
+                Status::Superseded => {
+                    active.profile.seed_dropped_status += 1;
+                    continue;
+                }
                 // Never seed from a stale node without re-grounding it first —
                 // unless the negative control has bypassed the guard.
-                Status::Stale if !self.admit_stale => active.stale_seen.push(idx),
+                Status::Stale if !self.admit_stale => {
+                    active.profile.seed_dropped_status += 1;
+                    active.stale_seen.push(idx);
+                }
                 // Contradicted and unresolved nodes seed like fresh ones: they
                 // are current, and they carry their marker into the window.
                 status if status.is_live() || self.admit_stale => seeds.push((idx, score)),
-                _ => continue,
+                _ => {
+                    active.profile.seed_dropped_status += 1;
+                    continue;
+                }
             }
         }
         // Fall back to the raw lexical index when state search finds nothing —
@@ -506,6 +650,7 @@ impl RelevancePlanner {
                     .and_then(|id| ctx.graph.idx_of(id))
                 {
                     if !seeds.iter().any(|(i, _)| *i == evidence) {
+                        active.profile.seed_from_spans += 1;
                         seeds.push((evidence, score * 0.8));
                     }
                 }
@@ -551,7 +696,11 @@ impl RelevancePlanner {
             }
         }
         while let Some((idx, depth)) = queue.pop_front() {
-            if depth >= self.max_depth || distances.len() >= self.max_candidates {
+            if distances.len() >= self.max_candidates {
+                active.profile.expand_capped = true;
+                continue;
+            }
+            if depth >= self.max_depth {
                 continue;
             }
             let node = ctx.graph.node(idx);
@@ -608,13 +757,20 @@ impl RelevancePlanner {
         qtype: QueryType,
         distances: &mut Vec<(NodeIdx, usize)>,
         pin: &[NodeIdx],
+        profile: &mut StageProfile,
     ) -> HashSet<NodeIdx> {
         let mut pinned: HashSet<NodeIdx> = pin.iter().copied().collect();
         let mut known: HashSet<NodeIdx> = distances.iter().map(|(i, _)| *i).collect();
         for kind in ctx.policy.pinned_kinds(qtype) {
+            // `by_kind` filters the whole node vector, so this stage visits the
+            // entire graph once per pinned kind. It is the only uncapped step
+            // in the planner, and `pin_scanned` is here so that fact appears in
+            // a table rather than being inferred from a latency curve.
+            profile.pin_scanned += ctx.graph.len();
             for idx in ctx.graph.by_kind(kind, true) {
                 pinned.insert(idx);
                 if known.insert(idx) {
+                    profile.pinned_added += 1;
                     distances.push((idx, 1));
                 }
             }
