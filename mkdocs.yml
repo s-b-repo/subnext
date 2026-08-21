@@ -6,6 +6,7 @@ theme:
 nav:
   - Home: index.md
   - Motivation: motivation.md
+  - Where this fits: use-cases.md
   - Concepts:
       - Representation ladder: concepts/representation-ladder.md
       - Stateful memory: concepts/stateful-memory.md

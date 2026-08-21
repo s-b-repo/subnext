@@ -98,7 +98,9 @@ the honest limitations.
 
 Measured on a 300-turn synthetic incident transcript (27k tokens of history,
 `B_attention` = 1200): **462 tokens per query — 59x less attention than the full
-history — with `k` staying flat as history grows 33x.** Against baselines that
+history.** On a lexically varied corpus the working set holds at **4.19 million
+tokens of history and 48,651 state nodes, answering from 235 tokens per query,
+7/7.** Against baselines that
 also retrieve, DCR answers 7/7 probes where top-k RAG answers 5/7 at 2.5x the
 tokens, and uniform summarisation answers 1/7.
 On a second corpus built so similarity is misleading and refusing is sometimes
@@ -114,6 +116,84 @@ high-water mark that refuses a rollback. An edited JSON store reloads silently;
 an edited container does not load. Without a signer this is tamper-*evident*,
 not tamper-proof, and [says so](docs/architecture/context-integrity.md#9-what-this-does-not-defend-against).
 
+## Where this fits
+
+DCR is built for one shape of problem: **a conversation or process that keeps
+producing facts, where earlier facts get corrected, and where the answer has to
+be traceable.** If your workload is not that shape, the machinery costs more than
+it returns and the honest recommendation is not to use it.
+
+### Good fits
+
+**Long-running agent loops.** The original motivation. An agent working a task
+over hundreds of turns accumulates state faster than any window holds it, and
+the failure is silent — a fluent answer built on a detail that was corrected
+three hundred turns ago. Every probe here resolves to raw source spans, so a
+wrong answer is attributable rather than mysterious.
+
+**Anything where a correction must win.** Incident response, ops runbooks,
+case management, long-lived tickets. The design treats revision as a first-class
+event: nothing is deleted, a correction supersedes rather than overwrites, and
+superseded material is excluded from planning while remaining in the record.
+`bench --mutate` measures whether the correction is actually served once the
+original has accumulated dependents, which is the case that breaks naive
+retrieval.
+
+**Regulated or auditable settings.** An unsourced fact cannot enter the graph —
+insertion raises rather than degrades — and every answer walks back to the spans
+that grounded it. Correctness in the benchmark is gated on that path being
+complete, so an answer that looks right but cannot be traced scores as a failure.
+
+**Tamper-evident record keeping.** The `.context` container stores
+content-addressed objects under a Merkle root with checkpoints chained so that
+editing history invalidates every generation after it. Useful where the question
+is not only "what did the system know" but "can anyone show it was not edited
+afterwards". Without a signer this is tamper-*evident*, not tamper-proof.
+
+**Cost-sensitive deployments over large histories.** 4.19 million tokens of
+history answered from 235 tokens per query is a different cost structure from
+feeding a long window, and it does not degrade with history length in the way a
+sliding window does.
+
+### Poor fits
+
+**Short single-turn work.** One document, one question, no corrections. The
+indexing, the graph and the knapsack are pure overhead — use retrieval, or just
+put the document in the prompt.
+
+**Tasks needing the full text verbatim.** DCR deliberately serves the cheapest
+sufficient representation. It can escalate to raw bytes when a probe demands an
+exact quote, and it charges for that, but if most of your queries need the whole
+source then bounded attention is the wrong objective.
+
+**Semantic search over paraphrase.** The bundled embedder is a 256-dimensional
+hashing embedding, not a learned one. It finds material that shares vocabulary.
+Genuine paraphrase retrieval needs a real embedding model swapped in — the
+interface takes any `str -> Vec<f32>`.
+
+**Reasoners that cannot signal.** The escalation protocol assumes the model can
+say "this compressed form is insufficient, give me the source". A model or
+harness with no way to emit that signal loses the mechanism that carries the
+exact-quote and buried-detail probes.
+
+**High-concurrency writes.** The consistency path is exercised and priced
+(`bench --consolidate`) but it is single-threaded. Nothing here runs two turns
+at once and no lock is exercised. Do not deploy it under concurrent ingest on
+the strength of these numbers.
+
+**Very large N where planning cost matters.** Retrieval is no longer the
+bottleneck — an LSH index prunes ~96% of scored vectors — but query latency still
+grows, and the remaining cost is in the planner. At 4.19M tokens that is 33ms per
+query, which is fine; whether it stays fine an order of magnitude further up is
+not established.
+
+### If you are evaluating it
+
+Run `bench --ablate` first. It reports which mechanisms carry which probes,
+including two that carry nothing on the standard corpus, and it will tell you
+faster than the prose whether the parts you care about are doing work on a
+workload like yours.
+
 ## Paper
 
 [**Dynamic Context Runtime: Bounded Attention over Unbounded History**](paper/dcr-bounded-attention.pdf)
@@ -125,10 +205,17 @@ two that carry nothing. Also readable
 Every table in it reproduces offline:
 
 ```bash
-cargo run --release -- bench            # context-rot comparison
-cargo run --release -- bench --scaling  # does k stay flat as history grows?
-cargo run --release -- bench --sweep    # correctness against B_attention
-cargo run --release -- bench --ablate   # which mechanism carries which probe?
+cargo run --release -- bench              # context-rot comparison
+cargo run --release -- bench --scaling    # does k stay flat as history grows?
+cargo run --release -- bench --diverse    # scaling on a varied corpus, to 4.19M tokens
+cargo run --release -- bench --sweep      # correctness against B_attention
+cargo run --release -- bench --ablate     # which mechanism carries which probe?
+cargo run --release -- bench --mutate     # is a correction served once the original has dependents?
+cargo run --release -- bench --multihop   # does graph expansion buy anything on a join?
+cargo run --release -- bench --coverage   # how much of the store is ever read back?
+cargo run --release -- bench --poison     # positive control: can the stale metric fire?
+cargo run --release -- bench --decay      # does a recency prefilter cost recall?
+cargo run --release -- bench --consolidate # a write landing mid-turn
 ```
 
 The PDF and the web version are both generated from `paper/paper.frag.html` by
