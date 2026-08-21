@@ -123,6 +123,16 @@ pub struct UtilityTerms {
 }
 
 impl UtilityTerms {
+    /// All weight in one term, for the constant-cost scorer control. Not a
+    /// scoring mode — it exists so the stage can be removed without disturbing
+    /// the candidate set the other stages see.
+    pub fn constant(value: f32) -> Self {
+        Self {
+            similarity: value,
+            ..Default::default()
+        }
+    }
+
     pub fn base(&self) -> f32 {
         self.similarity
             + self.proximity
@@ -464,6 +474,17 @@ pub struct RelevancePlanner {
     /// ones that reach furthest back: `old fact, never repeated` and
     /// `corrected fact (mid-history)`.
     pub recency_cutoff: f32,
+    /// Causal control only. When true the utility function is replaced by a
+    /// constant, leaving the candidate set, the corpus, the node count and every
+    /// other stage untouched.
+    ///
+    /// Proposed by a reader as the intervention that "scoring is 85% of
+    /// planning" needs: an 85% share is a correlation until you remove the
+    /// stage and watch the curve. If latency collapses, scoring is the cause;
+    /// if it persists, the share was real and the explanation incomplete.
+    /// Answers are meaningless under this flag — it exists to move a clock, not
+    /// to serve a query. Never enable in real use.
+    pub stub_scorer: bool,
     /// Negative control only. When true, stale nodes are planned as if fresh
     /// instead of being skipped — used to prove `stale_fact_read_rate` can
     /// return nonzero, so that a zero in production is a fired guard rather
@@ -482,6 +503,7 @@ impl Default for RelevancePlanner {
             max_candidates: 120,
             seed_min_ratio: 0.3,
             recency_cutoff: 0.0,
+            stub_scorer: false,
             admit_stale: false,
         }
     }
@@ -591,13 +613,19 @@ impl RelevancePlanner {
                 .copied()
                 .unwrap_or_else(|| ctx.policy.preferred_level(node, qtype, &available));
             preferred.insert(idx, want);
-            let terms = self.utility_terms(
-                ctx,
-                (idx, node, distance),
-                &query_vec,
-                &seed_scores,
-                &active,
-            );
+            // Under the causal control the utility function is skipped entirely
+            // and every other stage sees an identical candidate.
+            let terms = if self.stub_scorer {
+                UtilityTerms::constant(1.0)
+            } else {
+                self.utility_terms(
+                    ctx,
+                    (idx, node, distance),
+                    &query_vec,
+                    &seed_scores,
+                    &active,
+                )
+            };
             let base = terms.base().max(0.01);
             let mut options: Vec<Choice> = Vec::new();
             for level in &available {
