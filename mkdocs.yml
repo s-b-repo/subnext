@@ -7,6 +7,7 @@ nav:
   - Home: index.md
   - Motivation: motivation.md
   - Where this fits: use-cases.md
+  - Choosing a model: choosing-a-model.md
   - Concepts:
       - Representation ladder: concepts/representation-ladder.md
       - Stateful memory: concepts/stateful-memory.md

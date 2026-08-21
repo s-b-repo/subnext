@@ -123,6 +123,13 @@ producing facts, where earlier facts get corrected, and where the answer has to
 be traceable.** If your workload is not that shape, the machinery costs more than
 it returns and the honest recommendation is not to use it.
 
+Which model to put behind it is a separate question, and one this repository
+deliberately does not measure — the benchmark reasoner is a deterministic line
+matcher so that results describe context assembly rather than model quality.
+[Choosing a model](docs/choosing-a-model.md) gives selection criteria by category
+(coding, security work, automation, extraction, embeddings, local) and says
+up front that it is judgement rather than evidence.
+
 ### Good fits
 
 **Long-running agent loops.** The original motivation. An agent working a task
