@@ -18,7 +18,7 @@ use std::process::ExitCode;
 
 use dcr::bench::{
     run_ablation, run_baselines, run_benchmark, run_consolidation, run_coverage, run_decay, run_multi_hop, run_channels, run_mutation_probe, run_stages,
-    run_scaling_diverse, run_subject_control,
+    run_cache_layout, run_recall, run_scaling_diverse, run_subject_control,
     run_poison,
     run_rebuild, run_scaling, run_sweep, run_tamper,
 };
@@ -55,6 +55,8 @@ commands:
         --consolidate         correctness when the store is written mid-turn
         --diverse             scaling on a lexically varied corpus, to millions of tokens
         --subject             does it identify the subject, or the document that mentions it?
+        --cache               how much of each turn is a cacheable prefix of the last?
+        --recall              approximate top-k overlap against the exact scan
         --sweep               correctness and cost against B_attention
         --coverage            read coverage as history grows (offline dual)
         --poison              positive control: can stale_fact_read_rate fire?
@@ -380,6 +382,10 @@ fn run() -> Result<(), String> {
             let has = |name: &str| args.flags.iter().any(|f| f == name);
             if has("--scaling") {
                 run_scaling(&[100, 300, 1000, 3000], args.budget).map_err(to_err)?;
+            } else if has("--recall") {
+                run_recall(&[300, 1000, 3000], args.budget).map_err(to_err)?;
+            } else if has("--cache") {
+                run_cache_layout(args.turns, args.budget).map_err(to_err)?;
             } else if has("--subject") {
                 run_subject_control(args.turns, args.budget).map_err(to_err)?;
             } else if has("--diverse") {

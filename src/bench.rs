@@ -2783,3 +2783,142 @@ pub fn run_subject_control(turns: usize, budget: usize) -> Result<(), DcrError> 
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Prompt-cache friendliness
+// ---------------------------------------------------------------------------
+
+/// How much of each turn's assembled context is a byte-identical prefix of the
+/// previous turn's.
+///
+/// External work on production context assembly treats cache-aware layout as a
+/// first-order concern: providers bill cached prefix tokens at a large discount,
+/// so a context whose stable material comes first is materially cheaper than one
+/// that is re-derived each turn, at the same token count.
+///
+/// This runtime optimises the opposite quantity. It re-solves the knapsack every
+/// turn to assemble the cheapest *sufficient* context, which is by construction
+/// a different context. Nothing in the design tries to keep a stable prefix, and
+/// nothing in the reported cost model accounts for the discount that stability
+/// would earn. So "457 tokens per query" and "457 billable tokens per query" are
+/// not the same claim, and this measures the gap rather than assuming it away.
+pub fn run_cache_layout(turns: usize, budget: usize) -> Result<(), DcrError> {
+    let corpus = build_corpus(turns);
+    let mut runtime = Dcr::new(budget);
+    for (doc_id, text) in &corpus.docs {
+        runtime.ingest(text, Some(doc_id))?;
+    }
+    let mut reasoner = LocalReasoner::new();
+
+    println!("PROMPT-CACHE LAYOUT - {turns} turns, B_attention = {budget}");
+    println!(
+        "Shared prefix between consecutive turns, in the order the context is actually rendered."
+    );
+    let header = format!(
+        "{:<38} {:>9} {:>14} {:>10}",
+        "probe", "tokens", "shared prefix", "cacheable"
+    );
+    println!("{}", "-".repeat(header.len()));
+    println!("{header}");
+    println!("{}", "-".repeat(header.len()));
+
+    let mut previous: Option<String> = None;
+    let (mut total_tokens, mut total_shared) = (0usize, 0usize);
+    for probe in &corpus.probes {
+        let answer = runtime.ask_with(probe.query, None, &mut reasoner);
+        let rendered = answer.context.render();
+        let tokens = estimate_tokens(&rendered);
+        let shared_chars = previous
+            .as_ref()
+            .map(|prev| {
+                prev.as_bytes()
+                    .iter()
+                    .zip(rendered.as_bytes())
+                    .take_while(|(a, b)| a == b)
+                    .count()
+            })
+            .unwrap_or(0);
+        // Price the shared run in tokens, so the number is comparable to k.
+        let shared_tokens = estimate_tokens(&rendered[..shared_chars.min(rendered.len())]);
+        total_tokens += tokens;
+        total_shared += shared_tokens;
+        println!(
+            "{:<38} {tokens:>9} {shared_tokens:>14} {:>9.1}%",
+            probe.label,
+            shared_tokens as f64 / tokens.max(1) as f64 * 100.0
+        );
+        previous = Some(rendered);
+    }
+    println!("{}", "-".repeat(header.len()));
+    println!(
+        "overall cacheable prefix: {:.1}% of assembled tokens ({total_shared} of {total_tokens})",
+        total_shared as f64 / total_tokens.max(1) as f64 * 100.0
+    );
+    println!(
+        "A low number is not a bug — it is the cost of re-planning. It does mean the token\n\
+         counts elsewhere in this report are *assembled* tokens rather than *billable* ones,\n\
+         and that a cache-friendly assembler sending more tokens could still be cheaper per\n\
+         turn. Nothing here has measured that comparison."
+    );
+    Ok(())
+}
+
+/// Overlap between the approximate index's top-k and the exact scan's top-k.
+///
+/// The report currently defends LSH with "correctness is identical on both
+/// paths", which is seven probes agreeing on an answer. External guidance on
+/// approximate indices quotes recall — the fraction of the true top-k the
+/// approximate path actually returns — and that is the stronger statement,
+/// because two paths can agree on every answer while retrieving different
+/// material and diverge on the eighth question nobody asked.
+pub fn run_recall(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
+    println!("APPROXIMATE RETRIEVAL RECALL - top-k overlap against the exact scan");
+    let header = format!(
+        "{:<7} {:>7} {:>10} {:>12} {:>12}",
+        "turns", "nodes", "probes", "recall@12", "identical top-1"
+    );
+    println!("{}", "-".repeat(header.len()));
+    println!("{header}");
+    println!("{}", "-".repeat(header.len()));
+
+    for &turns in sizes {
+        let corpus = build_corpus(turns);
+        let mut runtime = Dcr::new(budget);
+        for (doc_id, text) in &corpus.docs {
+            runtime.ingest(text, Some(doc_id))?;
+        }
+        let (mut hits, mut total, mut top1) = (0usize, 0usize, 0usize);
+        for probe in &corpus.probes {
+            let qv = crate::embed::hashing_embed(probe.query, crate::embed::DIM);
+            runtime.index.set_exact(true);
+            let exact = runtime
+                .index
+                .search(crate::index::Namespace::Node, probe.query, &qv, 12);
+            runtime.index.set_exact(false);
+            let ann = runtime
+                .index
+                .search(crate::index::Namespace::Node, probe.query, &qv, 12);
+            let ann_ids: HashSet<usize> = ann.iter().map(|(i, _)| *i).collect();
+            hits += exact.iter().filter(|(i, _)| ann_ids.contains(i)).count();
+            total += exact.len();
+            if exact.first().map(|(i, _)| *i) == ann.first().map(|(i, _)| *i) {
+                top1 += 1;
+            }
+        }
+        runtime.index.set_exact(true);
+        println!(
+            "{turns:<7} {:>7} {:>10} {:>11.1}% {:>11}",
+            runtime.graph.len(),
+            corpus.probes.len(),
+            hits as f64 / total.max(1) as f64 * 100.0,
+            format!("{top1}/{}", corpus.probes.len())
+        );
+    }
+    println!("{}", "-".repeat(header.len()));
+    println!(
+        "Recall below 100% with correctness unchanged means the two paths retrieve different\n\
+         material and the probe set does not distinguish them. That is a weaker guarantee than\n\
+         'identical correctness' sounds, and it is the honest one."
+    );
+    Ok(())
+}
