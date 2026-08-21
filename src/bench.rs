@@ -1305,6 +1305,12 @@ fn run_mutation_set(
     }
     println!("{}", "-".repeat(header.len()));
     println!(
+        "policy digest: {}  — the weights, seed floor, depth/fan-out/candidate caps and control\n\
+         flags that decided these rejections. A pass is attributable to a named version of the\n\
+         rule rather than to whatever the policy happens to be when you read this.",
+        Dcr::new(budget).planner.policy_digest()
+    );
+    println!(
         "'stale k' is the runtime's own stale_fact_read_rate, shown for comparison: it stays 0\n\
          even on the row where superseded values are provably served, because disabling\n\
          supersession means nothing is ever marked. The 'stale served' column is ground truth."
@@ -2310,9 +2316,9 @@ pub fn run_stages(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
     println!("PLANNER STAGES - standard corpus, B_attention = {budget}, per query");
     println!();
     let header = format!(
-        "{:>7} {:>7} {:>10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>12} {:>12}",
-        "turns", "nodes", "plan us", "seed", "expand", "pin", "score", "knap", "admit", "spans/q",
-        "L0 builds/q"
+        "{:>7} {:>7} {:>10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>12}",
+        "turns", "nodes", "plan us", "seed", "expand", "pin", "score", "knap", "admit", "resid",
+        "spans/q", "L0 builds/q"
     );
     println!("{header}");
     println!("{}", "-".repeat(header.len()));
@@ -2338,15 +2344,19 @@ pub fn run_stages(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
         let l0_builds = runtime.ladder.l0_builds();
         let per = |d: std::time::Duration| d.as_secs_f64() * 1e6 / plans as f64;
         println!(
-            "{turns:>7} {:>7} {:>10.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>12.0} {:>12.2}",
+            "{turns:>7} {:>7} {:>10.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>10.0} {:>12.2}",
             runtime.graph.len(),
-            per(p.total()),
+            // `measured_time` is the independent clock around the whole call.
+            // Reporting `total()` here would make the residual identically zero
+            // by construction, which is the defect this column exists to expose.
+            per(p.measured_time),
             per(p.seed_time),
             per(p.expand_time),
             per(p.pin_time),
             per(p.score_time),
             per(p.knapsack_time),
             per(p.admit_time),
+            per(p.residual()),
             p.score_spans_priced as f64 / plans as f64,
             l0_builds as f64 / plans as f64,
         );
@@ -2652,6 +2662,124 @@ pub fn run_channels(turns: usize, budget: usize) -> Result<(), DcrError> {
          set is the measurement still missing, and it is the one the poor-fit entry\n\
          actually rests on.",
         only_one + shared_total
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Subject-identification control
+// ---------------------------------------------------------------------------
+
+/// The standard corpus with several documents per subject, only one of which
+/// carries the answer.
+///
+/// Proposed by a reader: *when one document equals one domain, domain is not
+/// identified.* [`build_corpus`] states each fact once, so "found the right
+/// document" and "found the right subject" are the same event and no probe can
+/// separate them. Every retrieval result published from that corpus therefore
+/// has subject identification confounded with document identification.
+///
+/// Here each subject appears in three documents — one stating the value, two
+/// discussing the subject without it, matched for length and position. A runtime
+/// keying on *does this document mention the subject* now has a one-in-three
+/// chance; one that identifies the fact is unaffected.
+///
+/// Added alongside the standard corpus, never replacing it: the published
+/// figures come from that one, and swapping it underneath them would invalidate
+/// the tables silently.
+pub fn build_corpus_permuted(turns: usize) -> Corpus {
+    let base = build_corpus(turns);
+    // Two decoys per fixed fact: same subject, no value, comparable length.
+    const DECOYS: &[(&str, &str)] = &[
+        ("the server ip", "was reviewed during the network audit and nobody raised a concern about it"),
+        ("the deploy window", "is discussed every fortnight at the change board and rarely moves"),
+        ("the service owner", "was confirmed unchanged in the last two on-call handovers"),
+        ("the error message", "appears in the archive from an unrelated incident eighteen months ago"),
+        ("the blocker", "was carried over from the previous review with no new detail attached"),
+        ("the hourly rate", "is set annually by finance and was not revisited this quarter"),
+        ("the engineer count", "is tracked in the staffing sheet and did not change this cycle"),
+        ("the retry budget", "is documented in the rollout policy and has never been amended"),
+        ("the checkout subnet", "was included in the quarterly inventory with no findings"),
+        ("the build", "was signed off by two reviewers before the freeze began"),
+    ];
+
+    let mut docs: Vec<(String, String)> = Vec::new();
+    let mut decoy = 0usize;
+    for (i, (id, text)) in base.docs.iter().enumerate() {
+        docs.push((id.clone(), text.clone()));
+        // Two decoys after each of the fixed opening documents, so the subject
+        // is present three times and the answering document is not positionally
+        // distinguished by being the only mention.
+        if i < 10 {
+            for k in 0..2 {
+                let (subject, tail) = DECOYS[(decoy + k) % DECOYS.len()];
+                docs.push((
+                    format!("d{i:02}{k}"),
+                    format!("Review note {i}{k}: {subject} {tail}."),
+                ));
+            }
+            decoy += 2;
+        }
+    }
+    Corpus {
+        docs,
+        probes: base.probes,
+    }
+}
+
+/// Does the runtime identify a subject, or the document that mentions it?
+pub fn run_subject_control(turns: usize, budget: usize) -> Result<(), DcrError> {
+    println!("SUBJECT IDENTIFICATION CONTROL - B_attention = {budget}");
+    println!(
+        "The standard corpus states each fact once, so 'found the document' and 'found the\n\
+         subject' are the same event. This adds two decoy documents per subject that mention\n\
+         it without carrying its value."
+    );
+    let header = format!(
+        "{:<28} {:>7} {:>9} {:>9}   {}",
+        "corpus", "docs", "correct", "mean k", "probes that fail"
+    );
+    println!("{}", "-".repeat(header.len()));
+    println!("{header}");
+    println!("{}", "-".repeat(header.len()));
+
+    for (label, corpus) in [
+        ("standard (1 doc/subject)", build_corpus(turns)),
+        ("with decoys (3 docs/subject)", build_corpus_permuted(turns)),
+    ] {
+        let mut runtime = Dcr::new(budget);
+        for (doc_id, text) in &corpus.docs {
+            runtime.ingest(text, Some(doc_id))?;
+        }
+        let mut reasoner = LocalReasoner::new();
+        let (mut correct, mut failed) = (0usize, Vec::new());
+        for probe in &corpus.probes {
+            let answer = runtime.ask_with(probe.query, None, &mut reasoner);
+            let scored = if probe.on_context {
+                answer.context.render()
+            } else {
+                answer.text.clone()
+            };
+            if probe.scores(&scored) {
+                correct += 1;
+            } else {
+                failed.push(probe.label);
+            }
+        }
+        println!(
+            "{label:<28} {:>7} {:>7}/{} {:>9.1}   {}",
+            corpus.docs.len(),
+            correct,
+            corpus.probes.len(),
+            runtime.telemetry.report().tokens_per_query_mean,
+            if failed.is_empty() { "-".to_string() } else { failed.join("; ") }
+        );
+    }
+    println!("{}", "-".repeat(header.len()));
+    println!(
+        "A drop here means the previous results measured document identification with subject\n\
+         confounded into it. Holding means subject identification is doing the work. Either\n\
+         way the standard corpus alone could not distinguish them."
     );
     Ok(())
 }

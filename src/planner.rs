@@ -171,6 +171,17 @@ impl UtilityTerms {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StageProfile {
     // -- clocks ------------------------------------------------------------
+    /// One clock around the whole `plan()` call, measured independently of the
+    /// per-stage clocks below.
+    ///
+    /// Without this, `total()` is the *sum* of the stages, so "the stages
+    /// account for the planner" is a tautology: work in an unclocked stage does
+    /// not appear as a residual, it does not appear at all. That is a control
+    /// that cannot fail, and it was sitting inside instrumentation built
+    /// precisely because an unclocked stage had hidden a cost. A reader summed
+    /// the published columns and asked what the leftover meant; the honest
+    /// answer was that the leftover could not mean anything until this existed.
+    pub measured_time: Duration,
     pub seed_time: Duration,
     pub expand_time: Duration,
     pub pin_time: Duration,
@@ -231,6 +242,7 @@ impl std::ops::AddAssign for StageProfile {
     /// Sum stage costs across the re-plans of one turn, or across a whole run.
     /// `expand_capped` is a disjunction: the cap bound at least once.
     fn add_assign(&mut self, rhs: Self) {
+        self.measured_time += rhs.measured_time;
         self.seed_time += rhs.seed_time;
         self.expand_time += rhs.expand_time;
         self.pin_time += rhs.pin_time;
@@ -272,6 +284,15 @@ impl StageProfile {
             + self.knapsack_time
             + self.admit_time
             + self.speculate_time
+    }
+
+    /// What the per-stage clocks failed to account for.
+    ///
+    /// Saturating, because the stages are sampled inside a call the outer clock
+    /// brackets, so tiny negative values are measurement noise rather than
+    /// findings. A residual that grows with N is an unclocked stage.
+    pub fn residual(&self) -> Duration {
+        self.measured_time.saturating_sub(self.total())
     }
 
     pub fn clocks(&self) -> [(&'static str, Duration); 7] {
@@ -467,6 +488,40 @@ impl Default for RelevancePlanner {
 }
 
 impl RelevancePlanner {
+    /// A stable digest of every knob that decides which candidate is rejected
+    /// and why.
+    ///
+    /// A reader's point: a receipt reading `guard fired 4/4` records that *a*
+    /// rule rejected the adversarial candidate, not *which version* of it. Change
+    /// a weight, a cap or the seed floor and every historical trace silently
+    /// re-interprets — the output is identical and its meaning is not. Binding
+    /// this to the result makes a pass attributable to a named, versioned rule
+    /// rather than to "the policy as it stands today".
+    ///
+    /// Covers the utility weights, the seed floor, the depth and fan-out caps,
+    /// the candidate cap and the two control flags. It does **not** cover the
+    /// routing table or the extractor, both of which also change what gets
+    /// rejected — so this narrows the gap rather than closing it, and the
+    /// credits say so.
+    pub fn policy_digest(&self) -> String {
+        let w = &self.weights;
+        let text = format!(
+            "w:{:?}|floor:{}|depth:{}|fanout:{}|cands:{}|decay:{}|stale:{}",
+            [
+                w.similarity, w.proximity, w.explain_path, w.confidence,
+                w.read_through, w.recency, w.stale_penalty, w.superseded_source,
+                w.contradiction_bonus, w.decay,
+            ],
+            self.seed_min_ratio,
+            self.max_depth,
+            self.max_fanout,
+            self.max_candidates,
+            self.recency_cutoff,
+            self.admit_stale,
+        );
+        crate::hash::sha256(text.as_bytes()).short(12)
+    }
+
     pub fn plan(
         &self,
         ctx: &PlanCtx<'_>,
@@ -476,6 +531,9 @@ impl RelevancePlanner {
         pin: &[NodeIdx],
         force_level: &HashMap<NodeIdx, Level>,
     ) -> ActiveContext {
+        // Independent of every per-stage clock below, so that
+        // `profile.residual()` can detect a stage nobody timed.
+        let whole_call = Instant::now();
         let budget = budget.unwrap_or(self.budget);
         let qtype = ctx.policy.classify(query);
         let mut active = ActiveContext {
@@ -613,6 +671,7 @@ impl RelevancePlanner {
             self.speculate(ctx, speculator, &distances, &query_vec, &active);
             active.profile.speculate_time = clock.elapsed();
         }
+        active.profile.measured_time = whole_call.elapsed();
         active
     }
 
