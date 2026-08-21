@@ -9,8 +9,15 @@ Verifying a deploy: compare the *PDF* checksum against the local artefact, not
 the HTML. Cloudflare rewrites the served HTML in transit — email obfuscation, a
 beacon script, a hidden link — so a raw HTML diff always shows several spurious
 hunks even on a correct deploy; compare visible text if you need to check it.
-Propagation has been observed between 25 s and 210 s, tracking machine load, so
+Propagation has been observed between 20 s and 210 s, tracking machine load, so
 a mismatch inside the first few minutes is not yet evidence of a failure.
+
+Checking whether a phrase made it into the PDF: search for a short fragment, not
+a whole phrase. `pdftotext` inserts newlines at line ends and form feeds at
+column and page breaks, so a two- or three-word probe straddling either one
+reports absent for text that is present. This has produced a false alarm three
+times; each was resolved by grepping a shorter fragment and printing the
+surrounding context rather than by trusting the boolean.
 
 The print PDF and the web version share `paper.frag.html`, so the prose can
 never drift between them.
