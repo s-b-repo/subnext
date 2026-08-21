@@ -42,8 +42,8 @@ SUBTITLE = (
 )
 AUTHOR = "Stephan Botes"
 AFFIL = "Cyber Sec &middot; cybersec.org.za"
-DATE = "20 August 2026"
-ISO_DATE = "2026-08-20"
+DATE = "21 August 2026"
+ISO_DATE = "2026-08-21"
 REPORT_ID = "DCR-TR-2026-01"
 SLUG = "research-dcr-bounded-attention"
 PDF_NAME = "dcr-bounded-attention.pdf"
