@@ -1,15 +1,19 @@
-//! The seed floor is load-bearing, and the standard probe set cannot see it.
+//! Correction-following must not depend on how much context the planner admits.
 //!
-//! Raising `seed_min_ratio` from 0.3 to 0.7 cuts the working set from 461.9
-//! tokens to 145.1 with all seven standard probes still answering correctly.
-//! That reads like a 3x saving for nothing. It is not: on the adversarial
-//! mutation set, where the superseded value is the closer lexical match, the
-//! same change takes correction-following from 4/4 to 0/4 and serves the stale
-//! value every time.
+//! It used to. Seeding excluded evidence whose every live dependent had been
+//! superseded — it still carries the old value verbatim, and a matcher that
+//! ignores notes answers from it — but `expand` re-admitted exactly those nodes
+//! through a dependency edge. A guard on one entrance of a room with two doors.
 //!
-//! Both directions are asserted here on purpose. A test that only pinned the
-//! good configuration would pass just as happily if the floor stopped mattering
-//! at all, which is the failure mode this whole file exists to catch.
+//! It surfaced by accident. Raising `seed_min_ratio` from 0.3 to 0.5 cut the
+//! working set from 461.9 tokens to 145.1 with all seven standard probes still
+//! passing, which looked like a free 3x saving; on the adversarial mutation set
+//! the same change served the superseded value on 3 of 4 queries. The threshold
+//! was never the cause — it changed which nodes seeded, which changed which
+//! expansions ran, and let the excluded node in through the second door.
+//!
+//! `expand` now applies the same rule `seed` does, and the tests below pin the
+//! property and its control separately.
 
 use dcr::bench::{ADVERSARIAL, build_mutation_corpus_from};
 use dcr::index::{Fusion, Namespace};
@@ -18,9 +22,19 @@ use dcr::runtime::Dcr;
 
 /// (corrected, stale served) over the adversarial mutation set.
 fn adversarial(floor: f32, fusion: Fusion) -> (usize, usize) {
+    score(floor, fusion, false)
+}
+
+/// The same, with the staleness exclusion disabled.
+fn adversarial_admitting_stale(floor: f32) -> (usize, usize) {
+    score(floor, Fusion::Linear, true)
+}
+
+fn score(floor: f32, fusion: Fusion, admit_stale: bool) -> (usize, usize) {
     let corpus = build_mutation_corpus_from(300, ADVERSARIAL);
     let mut rt = Dcr::new(1200);
     rt.planner.seed_min_ratio = floor;
+    rt.planner.admit_stale = admit_stale;
     rt.index.fusion = fusion;
     for (id, t) in &corpus.docs {
         rt.ingest(t, Some(id)).expect("ingest");
@@ -40,26 +54,42 @@ fn adversarial(floor: f32, fusion: Fusion) -> (usize, usize) {
 }
 
 #[test]
-fn default_seed_floor_follows_every_correction() {
-    let (corrected, stale) = adversarial(0.3, Fusion::Linear);
-    assert_eq!(corrected, ADVERSARIAL.len(), "default floor must correct all");
-    assert_eq!(stale, 0, "default floor must never serve the stale value");
+fn corrections_survive_every_seed_floor() {
+    // The property. How much context the planner admits is a cost decision; it
+    // must not be a correctness decision. Before the expansion guard this
+    // failed at 0.5 and above.
+    for floor in [0.3, 0.5, 0.7, 0.85] {
+        let (corrected, stale) = adversarial(floor, Fusion::Linear);
+        assert_eq!(
+            corrected,
+            ADVERSARIAL.len(),
+            "floor {floor} lost corrections: {corrected}/{}",
+            ADVERSARIAL.len()
+        );
+        assert_eq!(stale, 0, "floor {floor} served {stale} superseded values");
+    }
 }
 
 #[test]
-fn raising_the_seed_floor_breaks_correction_following() {
-    // The control for the test above. If this ever passes, the floor has
-    // stopped being the thing that carries corrections and the cheap
-    // configuration is no longer being rejected for a measured reason.
-    let (corrected, stale) = adversarial(0.7, Fusion::Linear);
-    assert!(
-        corrected < ADVERSARIAL.len(),
-        "a floor of 0.7 is supposed to lose corrections; it corrected {corrected}"
-    );
-    assert!(
-        stale > 0,
-        "a floor of 0.7 is supposed to serve superseded values; it served none"
-    );
+fn admitting_stale_evidence_breaks_correction_following() {
+    // The control for the test above, and the reason it is not a check that
+    // cannot fail. `admit_stale` disables the exclusion that both `seed` and
+    // `expand` apply. With it off the corpus is answered correctly at every
+    // floor; with it on, every query serves the superseded value at every
+    // floor. So the guard is what carries corrections, demonstrated rather
+    // than asserted.
+    for floor in [0.3, 0.5, 0.7, 0.85] {
+        let (corrected, stale) = adversarial_admitting_stale(floor);
+        assert_eq!(
+            corrected, 0,
+            "floor {floor}: admitting stale evidence should lose every correction"
+        );
+        assert_eq!(
+            stale,
+            ADVERSARIAL.len(),
+            "floor {floor}: admitting stale evidence should serve every superseded value"
+        );
+    }
 }
 
 #[test]

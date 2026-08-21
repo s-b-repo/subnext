@@ -501,7 +501,7 @@ impl Default for RelevancePlanner {
             max_depth: 3,
             max_fanout: 6,
             max_candidates: 120,
-            seed_min_ratio: 0.3,
+            seed_min_ratio: 0.5,
             recency_cutoff: 0.0,
             stub_scorer: false,
             admit_stale: false,
@@ -815,10 +815,31 @@ impl RelevancePlanner {
         let mut distances: Vec<(NodeIdx, usize)> = Vec::new();
         let mut seen: HashMap<NodeIdx, usize> = HashMap::new();
         let mut queue: VecDeque<(NodeIdx, usize)> = VecDeque::new();
+        // The same rule `seed` applies, applied here too.
+        //
+        // Seeding excludes evidence whose every live dependent has been
+        // superseded, because it still carries the old value verbatim and a
+        // matcher that ignores notes will answer from it. Expansion used to
+        // re-admit exactly those nodes through a dependency or dependent edge,
+        // so the guard held only for material that arrived by lexical match and
+        // was silently bypassed by material that arrived through the graph.
+        //
+        // That is a guard on one entrance of a room with two doors. It was
+        // found by tightening an unrelated threshold, which changed which nodes
+        // seeded, which changed which expansions ran, and let the excluded node
+        // in through the second door on an adversarial corpus where the
+        // superseded sentence is the better lexical match for the query.
+        let admit_stale = self.admit_stale;
+        let excluded = |idx: NodeIdx| -> bool {
+            !admit_stale && ctx.graph.node(idx).meta.superseded_source
+        };
         let push = |distances: &mut Vec<(NodeIdx, usize)>,
                     seen: &mut HashMap<NodeIdx, usize>,
                     idx: NodeIdx,
                     depth: usize| {
+            if excluded(idx) {
+                return false;
+            }
             match seen.entry(idx) {
                 Entry::Vacant(slot) => {
                     slot.insert(depth);

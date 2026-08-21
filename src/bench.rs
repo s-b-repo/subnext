@@ -2864,30 +2864,37 @@ pub fn run_cache_layout(turns: usize, budget: usize) -> Result<(), DcrError> {
 }
 
 /// Reciprocal rank fusion against the linear blend — and the seed floor, which
-/// turned out to be the variable that actually moves.
+/// is how a real defect was found.
 ///
 /// External writing on production retrieval prefers RRF because two channels'
 /// scores are not on a common scale, and this index normalises each channel by
 /// its own top hit — which makes a channel's influence depend on the shape of
 /// its score distribution rather than on how well it ranked anything. The
-/// argument is sound and the swap is implemented. It buys nothing here.
+/// argument is sound and the swap is implemented. It buys nothing here, which
+/// the channel measurement predicted: 195 of 220 ranked positions on this
+/// corpus are surfaced by exactly one channel, and RRF rewards agreement.
 ///
-/// What it exposed instead is worth more than the fusion question. RRF flattens
-/// the score list, which stops `seed_min_ratio` binding, which admits more seeds
-/// and costs 20% more attention — so the first version of this comparison was
-/// reading a disabled filter as a property of the fusion. Sweeping the floor
-/// under *both* fusions shows the published 461.9 tokens/query is a loose
-/// default rather than a tuned figure, and that the seven standard probes score
-/// 7/7 across a 3x range of working-set sizes, so they cannot referee the choice.
-/// The second table asks a probe set that can.
+/// The floor sweep is the part that mattered. RRF flattens the score list, which
+/// stops `seed_min_ratio` binding, which changed which nodes seeded, which
+/// changed which expansions ran — and that exposed a guard with a hole in it.
+/// Seeding excludes evidence whose every live dependent has been superseded;
+/// `expand` did not, and re-admitted exactly those nodes through a dependency
+/// edge. Raising the floor made the second door easy to walk through, so a
+/// configuration 3x cheaper on the standard probes served the superseded value
+/// on 3 of 4 adversarial queries.
+///
+/// `expand` now applies the same rule. Both tables below are what that looks
+/// like: correctness no longer moves with the floor, so the floor is a cost
+/// knob rather than a correctness knob, and the cheap configuration is the
+/// default.
 pub fn run_fusion(turns: usize, budget: usize) -> Result<(), DcrError> {
     println!("FUSION AND SEED FLOOR - rank fusion against the linear blend, across seed floors");
     println!("corpus: standard, {turns} turns, B_attention = {budget}\n");
 
     let corpus = build_corpus(turns);
     let modes: [(&str, crate::index::Fusion, f32); 6] = [
-        ("linear (default)", crate::index::Fusion::Linear, 0.3),
-        ("linear", crate::index::Fusion::Linear, 0.5),
+        ("linear (old default)", crate::index::Fusion::Linear, 0.3),
+        ("linear (default)", crate::index::Fusion::Linear, 0.5),
         ("linear", crate::index::Fusion::Linear, 0.7),
         ("linear", crate::index::Fusion::Linear, 0.85),
         ("rrf k0=60", crate::index::Fusion::Rrf { k0: 60.0 }, 0.3),
@@ -3019,21 +3026,22 @@ pub fn run_fusion(turns: usize, budget: usize) -> Result<(), DcrError> {
     }
     println!("{}", "-".repeat(mut_header.len()));
     println!(
-        "\nRead the seed:floor column before the token column. RRF flattens the score list, so\n\
-         `seed_min_ratio` - a fraction of the top hit - stops discarding anything, and the extra\n\
-         attention RRF appears to cost is a disabled filter rather than a property of the fusion.\n\
-         Matched on seeds, the two fusions are within noise of each other on this corpus, which\n\
-         is what the channel measurement predicts: RRF rewards agreement between channels, and\n\
-         195 of 220 ranked positions here are surfaced by exactly one channel.\n\
+        "\nBoth tables used to disagree, and the disagreement was the finding. Raising the floor\n\
+         cut the working set 3x with the standard probes still at 7/7, while correction-following\n\
+         fell from 4/4 to 1/4 -- so the floor looked like a free saving and was silently buying\n\
+         correctness. It was not. The floor changed which nodes seeded, which changed which\n\
+         expansions ran, and `expand` was re-admitting superseded evidence that `seed` had\n\
+         already excluded. A guard on one entrance of a room with two doors.\n\
          \n\
-         The floor is the variable that moves, and the second table is why nothing was changed\n\
-         on the strength of the first. Raising it to 0.5 cuts the working set from 461.9 tokens\n\
-         to 145.1 with the standard probes still at 7/7 - a 3x saving that reads like a free\n\
-         win - and takes correction-following from 4/4 to 1/4, serving the superseded value on\n\
-         3 of 4 queries. The default is not loose, it is load-bearing, and seven probes scoring\n\
-         7/7 across a 3x range of working-set sizes is a probe set that cannot referee its own\n\
-         configuration. Tuning against it would have shipped a headline token figure and a\n\
-         broken correction path, both green."
+         With the same rule applied in both places, the corrected column holds at every floor\n\
+         and the token column still falls. That is the shape a real fix makes: the cheap\n\
+         configuration stops being dangerous rather than the expensive one being justified.\n\
+         \n\
+         The instrument lesson survives the fix and is the more transferable half. Seven probes\n\
+         reading 7/7 across a 3x range of working-set size were not agreeing that the settings\n\
+         were equivalent -- they were unable to disagree. A second probe set built for an\n\
+         unrelated purpose is the only reason the hole was found, and it was found by tuning a\n\
+         threshold that had nothing to do with supersession."
     );
     Ok(())
 }
