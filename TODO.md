@@ -571,6 +571,86 @@ of it:
 
 ---
 
+## 17. Cache-aware layout is unmodelled, and the cost claim is narrower than it reads
+
+**From outside work on production context assembly** (zylos.ai, 2026-03-17),
+which treats cache-aware layout as a first-order cost concern: providers bill a
+cached prefix at a steep discount, so ordering stable material first is
+materially cheaper at the same token count.
+
+This runtime optimises against that. It re-solves the knapsack every turn to
+assemble the cheapest *sufficient* context, which is by construction a different
+context. Measured (`bench --cache`): **1.0% of assembled tokens are a shared
+prefix with the previous turn** — 36 of 3,504, and the 36 is a header.
+
+So `457 tokens per query` counts *assembled* tokens, not *billable* ones. A
+cache-friendly assembler sending more tokens could be cheaper per turn, and
+nothing here has run that comparison. That is the honest scope of the cost claim
+and the report should carry it.
+
+**What would settle it:** price both under a real provider's cached/uncached
+split — full history with a stable prefix against DCR's re-planned context — and
+report cost per turn rather than tokens per turn. The answer might not favour
+this design, which is the reason to run it.
+
+**Not adopted from the same source, and why.** Their fixed per-region budgets
+(pinned / summary / retrieved / recent) are strictly weaker than a knapsack over
+all candidates — a fixed split cannot trade a cheap summary against an expensive
+quote when the query needs the quote. Their substrate/projection separation is
+this design's two-system split under different names, and their hierarchical
+summarisation is the representation ladder. Reciprocal rank fusion instead of
+the current linear lexical/vector blend is untested and worth trying, given the
+two channels here are already known to be correlated rather than independent.
+
+---
+
+## 18. Recall is the honest measure of the approximate index, and it is 54.8%
+
+Prompted by the same source quoting 85-95% recall for well-tuned approximate
+indices — a metric this report does not use.
+
+`bench --recall`, top-k overlap against the exact scan:
+
+| turns | nodes | recall@12 | identical top-1 |
+|---:|---:|---:|---:|
+| 300 | 298 | 100.0% | 7/7 |
+| 1,000 | 911 | 58.3% | 6/7 |
+| 3,000 | 2,661 | 54.8% | 6/7 |
+
+The report defends LSH with "correctness is identical on both paths". That is
+seven probes agreeing on an answer while the two paths retrieve substantially
+different material — a much weaker guarantee than the phrase implies, and the
+probe set cannot distinguish them.
+
+**Tuning made it worse, instructively.** Doubling the table count drops recall to
+39.3%, because larger candidate sets trip the exact-scan fallback less often. So
+part of the 54.8% is the approximate path *giving up and doing the exact thing*,
+not LSH succeeding — the number is partly a fallback frequency. Left at 8 tables
+and reported rather than tuned to a nicer figure.
+
+---
+
+## 19. Evaluated only on a corpus we wrote
+
+**From DyCP (arXiv 2601.07994)**, which evaluates on LoCoMo, MT-Bench+ and
+SCM4LLMs. This project has never run a public long-conversation benchmark. Every
+number comes from a generator written by the same people who wrote the probes,
+which is the conditioned-sample problem a reviewer raised, still unaddressed at
+the level that matters.
+
+**The honest blocker:** those benchmarks need a real model. The harness reasoner
+is a deterministic line-matcher on purpose, so that results measure context
+assembly rather than model quality — and that same choice makes public
+benchmarks unrunnable here without giving up the property the design is
+evaluated on. Not an excuse, a real tension, and it is why the gap has stayed
+open.
+
+**Also unmodelled:** positional attention bias. The knapsack decides *what* to
+admit and nothing decides *where* it goes in the rendered context. If mid-context
+material is attended less, ordering is a free variable being left to chance.
+
+---
+
 ## What is still open
 
 - **Two multi-hop chains of three still fail.** They need partial-key matching
