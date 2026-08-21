@@ -306,6 +306,35 @@ pub enum Namespace {
     Span,
 }
 
+/// How the two channels' rankings are combined into one.
+///
+/// External writing on production retrieval favours reciprocal rank fusion over
+/// a weighted score blend, on the grounds that scores from two channels are not
+/// on a common scale and normalising by the top hit makes a channel's influence
+/// depend on the *shape* of its score distribution: a channel with one dominant
+/// hit has everything below it crushed toward zero, while a flat channel keeps
+/// its whole list near its weight. Ranks have no such problem.
+///
+/// Kept as an option rather than a replacement. `Linear` is the default because
+/// every published figure was measured on it, and `bench --fusion` measures what
+/// the swap costs instead of assuming the newer method is better here.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Fusion {
+    /// Max-normalised weighted blend of the two channels' scores.
+    Linear,
+    /// Reciprocal rank fusion: a hit contributes `w / (k0 + rank)`, so only its
+    /// position in each channel matters. `k0` damps the top of the list — the
+    /// usual value is 60.
+    ///
+    /// Note what this does to anything downstream that reads the score as a
+    /// magnitude: `1/(60+1)` and `1/(60+12)` differ by 15%, so a rank-fused list
+    /// is nearly flat. The planner's seed floor is `top * seed_min_ratio`, which
+    /// is scale-free and therefore safe, but it stops *binding* under RRF. That
+    /// is a real consequence of the method rather than a bug, and `bench
+    /// --fusion` reports it.
+    Rrf { k0: f32 },
+}
+
 /// Lexical + vector, score-normalised and blended.
 #[derive(Debug)]
 pub struct HybridIndex {
@@ -314,6 +343,8 @@ pub struct HybridIndex {
     span_lexical: LexicalIndex,
     span_vector: VectorIndex,
     pub lexical_weight: f32,
+    /// How the two channels are combined. `Linear` by default.
+    pub fusion: Fusion,
 }
 
 impl Default for HybridIndex {
@@ -324,6 +355,7 @@ impl Default for HybridIndex {
             span_lexical: LexicalIndex::default(),
             span_vector: VectorIndex::default(),
             lexical_weight: 0.55,
+            fusion: Fusion::Linear,
         }
     }
 }
@@ -362,14 +394,52 @@ impl HybridIndex {
         let lex = lexical.search(query, k * 3);
         let vec = vector.search(query_vec, k * 3);
         let mut combined: HashMap<usize, f32> = HashMap::new();
-        if let Some(top) = lex.first().map(|(_, s)| *s).filter(|s| *s > 0.0) {
-            for (id, score) in lex {
-                *combined.entry(id).or_insert(0.0) += self.lexical_weight * (score / top);
+        match self.fusion {
+            Fusion::Linear => {
+                if let Some(top) = lex.first().map(|(_, s)| *s).filter(|s| *s > 0.0) {
+                    for (id, score) in lex {
+                        *combined.entry(id).or_insert(0.0) += self.lexical_weight * (score / top);
+                    }
+                }
+                if let Some(top) = vec.first().map(|(_, s)| *s).filter(|s| *s > 0.0) {
+                    for (id, score) in vec {
+                        *combined.entry(id).or_insert(0.0) +=
+                            (1.0 - self.lexical_weight) * (score / top);
+                    }
+                }
             }
-        }
-        if let Some(top) = vec.first().map(|(_, s)| *s).filter(|s| *s > 0.0) {
-            for (id, score) in vec {
-                *combined.entry(id).or_insert(0.0) += (1.0 - self.lexical_weight) * (score / top);
+            Fusion::Rrf { k0 } => {
+                // A zero-scoring hit is not a ranked hit. The lexical channel
+                // pads with zeros where nothing matched, and rewarding those by
+                // position would fuse noise.
+                for (pos, (id, score)) in lex.iter().enumerate() {
+                    if *score <= 0.0 {
+                        continue;
+                    }
+                    *combined.entry(*id).or_insert(0.0) +=
+                        self.lexical_weight / (k0 + pos as f32 + 1.0);
+                }
+                for (pos, (id, score)) in vec.iter().enumerate() {
+                    if *score <= 0.0 {
+                        continue;
+                    }
+                    *combined.entry(*id).or_insert(0.0) +=
+                        (1.0 - self.lexical_weight) / (k0 + pos as f32 + 1.0);
+                }
+                // Rescale to top = 1.0. Without this the fused scores land two
+                // orders of magnitude below the linear path's, and every
+                // downstream consumer that reads a score as a magnitude would
+                // change behaviour for a reason that has nothing to do with
+                // ranking. Rescaling keeps the comparison about order.
+                if let Some(top) = combined.values().copied().fold(None::<f32>, |a, b| {
+                    Some(a.map_or(b, |a: f32| a.max(b)))
+                }) {
+                    if top > 0.0 {
+                        for v in combined.values_mut() {
+                            *v /= top;
+                        }
+                    }
+                }
             }
         }
         rank(combined.into_iter().collect(), k)
