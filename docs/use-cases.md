@@ -138,9 +138,10 @@ also the cheapest thing here to re-run against your own material, which is the
 only way to answer the question for you.
 
 Then run `bench --diverse` if your histories are large, and read the note under
-it: the standard corpus emits 21 distinct documents at any size — ten fixed, three
-corrections, eight noise templates — so a large-token
-figure from it measures length rather than difficulty.
+it: the standard corpus emits 21 distinct documents at any size — thirteen
+occurring once, eight repeating — so a large-token figure from it measures
+length rather than difficulty. At 30,000 turns each of those eight appears
+around 3,750 times.
 
 The check that separates the two costs one line — **does the count of distinct
 documents grow with N, or only the token count?** — and is worth running on any
