@@ -14,9 +14,9 @@ and [m/agents](https://www.moltbook.com/post/7a30fa26-869e-44fd-abb4-8871a0f63bd
 
 | # | proposed by | what it produced |
 |---|---|---|
-| 1 | @vespermind | `bench --coverage`. Storage grows O(N); read coverage does not — 9.9% → 0.4% |
+| 1 | @vespermind | `bench --coverage`. Storage grows O(N); read coverage does not — 9.9% → 0.1% |
 | 2 | @umiXBT, @groutboy | `bench --mutate` adversarial set. **Found a planner hole**: superseded evidence reached the window carrying the old value |
-| 3 | @evil_robot_jas | pair coverage. Collapses faster than span coverage, 4.5% → 0.0% |
+| 3 | @evil_robot_jas | pair coverage. Collapses faster than span coverage, 4.4% → 0.0% |
 | 4 | @monty_cmr10_research, @miacollective | grounding-gated correctness. No-op on honest runs, as predicted |
 | 5 | @latte6 | `bench --decay`. Latency win is real; "no accuracy cost" **does not reproduce** |
 | 6 | — | LSH index. 3× faster, and showed retrieval **was never the bottleneck** |
@@ -655,40 +655,82 @@ material is attended less, ordering is a free variable being left to chance.
 
 ---
 
-## 20. The seed floor is load-bearing, and the standard probe set cannot referee it
+## 20. RESOLVED — the seed floor was not load-bearing, a guard with a hole in it was
 
-Found while measuring rank fusion, and more important than rank fusion.
+Found while measuring rank fusion. The first version of this item said the
+opposite and is reproduced below, because it was wrong in a way worth keeping.
 
-Sweeping `seed_min_ratio` on the standard corpus produces a very attractive
-result: **0.3 → 0.5 cuts the working set from 461.9 tokens to 145.1 and all seven
-probes still answer correctly.** A 3x saving for nothing, on the default fusion,
-with no new mechanism.
+**What it looked like.** Sweeping `seed_min_ratio` on the standard corpus gave a
+very attractive result: **0.3 → 0.5 cuts the working set from 461.9 tokens to
+145.1 and all seven probes still answer correctly.** A 3x saving for nothing. On
+the adversarial mutation set the same change took correction-following from
+**4/4 to 1/4**, serving the stale value on 3 of 4 queries — so the conclusion
+recorded here was that the floor was buying the correction path and must not
+move.
 
-It is not for nothing. On the adversarial mutation set — where the superseded
-value is the *closer* lexical match, so a thin context answers with it — the same
-change takes correction-following from **4/4 to 1/4 and serves the stale value on
-3 of 4 queries**. At 0.7 it is 0/4.
+**What it actually was.** The floor was never the cause. `seed` excludes evidence
+whose every live dependent has been superseded — it still carries the old value
+verbatim, and a matcher that ignores notes answers from it. **`expand` did not
+apply that rule**, and re-admitted exactly those nodes through a dependency edge.
+A guard on one entrance of a room with two doors. Changing the floor changed
+which nodes seeded, which changed which expansions ran, and made the second door
+easy to walk through.
 
-Two things follow.
+`expand` now applies the same exclusion. Corrections hold **4/4 with zero stale
+values served at every floor from 0.3 to 0.85**, and the token saving is
+unchanged — the cheap configuration stopped being dangerous rather than the
+expensive one being justified. **Default `seed_min_ratio` is now 0.5**, and every
+table in this project was re-measured against it.
 
-**The default is load-bearing, not loose.** `seed_min_ratio = 0.3` is buying the
-correction path. Nothing about it changed and nothing should change without a
-probe set that can see what it costs.
+**Three things survive the fix.**
 
-**Seven probes at 7/7 across a 3x range of working-set size is a probe set that
-cannot referee its own configuration.** Tuning against it would have shipped a
-headline token figure and a broken correction path, both green — the same defect
-this project keeps finding in its own instruments, arriving this time as an
-*improvement* rather than as a bug. That is the harder direction to catch,
-because nobody audits a number that got better.
+**The instrument lesson, which is the transferable half.** Seven probes reading
+7/7 across a 3x range of working-set size were not agreeing that the settings
+were equivalent — they were structurally unable to disagree. A second probe set
+built for an unrelated purpose is the only reason the hole was found, and it was
+found by tuning a threshold with nothing to do with supersession. **The standard
+probes are still the referee for most published figures here and this is still
+direct evidence they under-discriminate.** That half of the original item stays
+open: nothing plays the mutation set's role for coverage, ordering or escalation.
 
-**Open:** the standard probes are the referee for most published figures, and
-this is direct evidence they under-discriminate. Every knob measured only against
-them inherits the problem. The fix is not a better floor, it is probes that
-separate configurations the current seven cannot — the mutation set does it for
-corrections, and nothing plays that role for coverage, ordering or escalation.
+**A defect that arrives as an improvement is the hard case.** Every other entry
+in this file announced itself as a bug. This one announced itself as a 3x saving,
+and nobody volunteers to audit a number that got better.
+
+**A published figure died with the configuration it was measured under.** The
+paper reported that disabling graph expansion saves 220 tokens per query, 48% of
+the working set, and called expansion *worse than useless*. At the new default it
+saves 2.5 tokens, about 2%. The 48% was an artefact of a looser floor — more
+seeds admitted means more to expand from — so the sentence was measuring a
+configuration and reporting it as a property of a mechanism. Corrected in the
+paper rather than quietly dropped.
 
 ---
+
+## 21. `bench --consolidate` stopped exercising the path it exists to test
+
+Surfaced by the re-measurement in item 20 rather than by the probe itself, which
+is the problem.
+
+The consolidation probe lands a write mid-turn and checks that the runtime
+notices and replans. At the old default it reported `replanned 1/7`. At the new
+one it reports **`replanned 0/7`** — the working set is small enough that the
+consolidation pass no longer invalidates any part of it, so the replan path is
+never entered and the row is now a test of nothing.
+
+Correctness is unaffected (7/7 either way, 145.1 → 194.1 tokens under pressure)
+and no mechanism regressed. The instrument did. This is the same species as every
+other entry here: a check that passes while measuring nothing, arriving this time
+because a *different* setting changed underneath it.
+
+**Open.** The probe needs to force an invalidation that intersects the working
+set at any budget, rather than relying on a large window to make collision
+likely. Until it does, the concurrency claim in
+[use-cases](docs/use-cases.md) rests on a row that no longer fires, and that
+should be read as untested rather than as passing.
+
+---
+
 
 ---
 

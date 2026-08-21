@@ -97,11 +97,11 @@ container, and the telemetry the evaluation design asks for. See
 the honest limitations.
 
 Measured on a 300-turn synthetic incident transcript (27k tokens of history,
-`B_attention` = 1200): **462 tokens per query — 59x less attention than the full
+`B_attention` = 1200): **145 tokens per query — 189x less attention than the full
 history.** On a lexically varied corpus the working set holds at **4.19 million
-tokens of history and 48,651 state nodes, answering from 235 tokens per query,
+tokens of history and 48,651 state nodes, answering from 259 tokens per query,
 7/7.** Against baselines that
-also retrieve, DCR answers 7/7 probes where top-k RAG answers 5/7 at 2.5x the
+also retrieve, DCR answers 7/7 probes where top-k RAG answers 5/7 at 8x the
 tokens, and uniform summarisation answers 1/7.
 On a second corpus built so similarity is misleading and refusing is sometimes
 correct, **DCR scores 2/5 and loses to recursive map-reduce** — it serves a
@@ -151,12 +151,12 @@ is not only "what did the system know" but "can anyone show it was not edited
 afterwards". Without a signer this is tamper-*evident*, not tamper-proof.
 
 **Cost-sensitive deployments over large histories.** 4.19 million tokens of
-history answered from 235 tokens per query is a different cost structure from
+history answered from 259 tokens per query is a different cost structure from
 feeding a long window, and it does not degrade with history length in the way a
 sliding window does. That counts *assembled* tokens and not
 billable ones. Re-planning every turn produces a different context every turn, so
 consecutive contexts share only a 6-token header — `bench --cache` measures the
-cacheable prefix at **1.0%**, 36 of 3,504 tokens. A cache-friendly assembler
+cacheable prefix at **2.8%**, 36 of 1,293 tokens. A cache-friendly assembler
 sending *more* tokens could be cheaper per turn under a provider that discounts
 cached prefixes, and that comparison has not been run.
 

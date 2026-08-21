@@ -45,7 +45,7 @@ tokens per resolved query, audit-path completeness, demotions and budget
 overflows.
 
 On a 300-turn synthetic incident transcript (27k tokens of history,
-`B_attention` = 1200), attention cost is 462 tokens per query — 59x less than
+`B_attention` = 1200), attention cost is 145 tokens per query — 189x less than
 the full history — and stays flat (417 → 413 tokens) while history grows 33x to
 283k tokens.
 

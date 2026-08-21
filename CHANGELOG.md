@@ -12,6 +12,37 @@ yet; everything below is on `main` at `0.1.0`.
 
 ## [Unreleased]
 
+### 2026-08-21 — Fixed: expansion re-admitted evidence seeding had excluded
+
+`seed` excludes evidence whose every live dependent has been superseded; `expand`
+did not, and re-admitted exactly those nodes through a dependency edge. A guard on
+one entrance of a room with two doors. `expand` now applies the same rule.
+
+Found by accident. Raising `seed_min_ratio` from 0.3 to 0.5 cut the working set
+3x with every standard probe still passing, and took correction-following on the
+adversarial set from 4/4 to 1/4. The threshold was never the cause — it changed
+which nodes seeded, which changed which expansions ran.
+
+**Default `seed_min_ratio` moved 0.3 → 0.5, and every published figure was
+re-measured.** The headline moves from 462 tokens per query and 59x to **145 and
+189x**, at unchanged 7/7. The ablation's correctness pattern is identical across
+all eight variants; the mutation and adversarial sets are 4/4 at every floor;
+multihop is 1/3; the subject control is 6/7 with decoys; 164 tests pass.
+
+Three consequences worth reading before the new numbers:
+
+- **The saving is corpus-specific.** On the diverse corpus the same change moves
+  196 → 219 tokens at 3,000 turns, slightly *upward*. The floor is a fraction of
+  the top hit, so its effect depends on each corpus's score distribution.
+- **A published claim died with its configuration.** "Disabling graph expansion
+  saves 220 tokens per query, 48% of the working set" is now 2.5 tokens and 2%.
+  The 48% was an artefact of the looser floor, so the paper's *worse than
+  useless* verdict on expansion was describing a configuration, not a mechanism.
+- **`bench --consolidate` stopped firing.** It reports `replanned 0/7` where it
+  read 1/7: the working set is now too small for the mid-turn write to intersect.
+  The concurrency row is untested rather than passing until the probe is rebuilt.
+
+
 The repository began as a specification. It now carries a Rust reference
 implementation, a second implementation in Python, a technical report, and a
 benchmark suite whose results are reproducible offline with no API key.

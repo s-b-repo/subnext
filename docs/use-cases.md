@@ -64,14 +64,15 @@ tamper-*evident*, not tamper-proof, and
 
 ### Cost-sensitive work over large histories
 
-4.19 million tokens of history answered from 235 tokens per query, with 48,651
+4.19 million tokens of history answered from 259 tokens per query, with 48,651
 state nodes. That is a different cost structure from feeding a long window, and
 unlike a sliding window it does not lose old material permanently — a fact
 outside a window is unrecoverable at any model quality, while a fact outside the
 current working set is one plan away. That counts *assembled* tokens and not
 billable ones. Re-planning every turn produces a different context every turn, so
 consecutive contexts share only a 6-token header — `bench --cache` measures the
-cacheable prefix at **1.0%**, 36 of 3,504 tokens. A cache-friendly assembler
+cacheable prefix at **2.8%**, 36 of 1,293 tokens. The shared bytes are the same 36
+either way; the fraction rose only because the working set got smaller. A cache-friendly assembler
 sending *more* tokens could be cheaper per turn under a provider that discounts
 cached prefixes, and that comparison has not been run.
 
@@ -161,8 +162,8 @@ rather than arriving as a control token.
 
 `Dcr::auto_escalate` reconstructs the escalation decision inside the runtime
 from the query and the assembled window, using the same `policy::overlap`
-function the reasoner uses so the two cannot drift. It also scores 7/7, at 461.9
-tokens against 447.1 — **15 tokens per query for no measurable gain on this
+function the reasoner uses so the two cannot drift. It also scores 7/7, at 145.1
+tokens against 130.4 — **15 tokens per query for no measurable gain on this
 corpus.** It is off by default and is not offered as a fix for anything
 currently demonstrated.
 
@@ -170,7 +171,11 @@ currently demonstrated.
 
 The consistency path — snapshot isolation with an interrupt — is exercised by
 tests and priced by `bench --consolidate`, which lands a write mid-turn and
-measures the replan. But it is single-threaded. Nothing runs two turns at once
+measures the replan — except that since the seed floor moved to 0.5 the working
+set is small enough that the mid-turn write no longer intersects it, so the probe
+reports `replanned 0/7` and the replan path is not entered at all. Read that row
+as untested rather than as passing until the probe is rebuilt to force the
+collision at any budget. And it is single-threaded. Nothing runs two turns at once
 and no lock is exercised. Do not deploy under concurrent ingest on the strength
 of these numbers.
 

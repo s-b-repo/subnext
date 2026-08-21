@@ -120,8 +120,8 @@ justification / multi-hop               ok    MISS    ok          192
 detail buried in a long span            ok    MISS    ok          962
 corrected fact (very late)              ok     ok     ok          102
 correct                                    5       2      7   of 7
-mean tokens per query                 27362.0  7968.0  461.9
-attention vs full history                 1x    3.4x    59x
+mean tokens per query                 27362.0  7968.0  145.1
+attention vs full history                 1x    3.4x   189x
 ```
 
 `cargo run --release -- bench --scaling --budget 800` — the `O(k + r)` claim:

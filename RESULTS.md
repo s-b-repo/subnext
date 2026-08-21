@@ -29,8 +29,8 @@ including when the numbers get worse.
 | | full context | sliding window (8k) | DCR |
 |---|---:|---:|---:|
 | correct | 5/7 | 2/7 | **7/7** |
-| tokens/query | 27,362 | 7,968 | **462** |
-| attention vs full history | 1x | 3.4x | **59x** |
+| tokens/query | 27,362 | 7,968 | **145** |
+| attention vs full history | 1x | 3.4x | **189x** |
 
 Per probe:
 
@@ -49,7 +49,7 @@ Telemetry for the DCR column:
 ```
 escalation_rate         : 0.143
 stale_fact_read_rate    : 0.000
-tokens_per_query_mean   : 461.9
+tokens_per_query_mean   : 145.1
 tokens_per_query_max    : 963
 budget_overflows        : 0
 demotions               : 3
@@ -75,7 +75,7 @@ read this as "DCR is more accurate than a long-context model."
 
 The two load-bearing results are:
 
-1. **The token counts.** 462 vs 27,362 is a property of what gets assembled,
+1. **The token counts.** 145 vs 27,362 is a property of what gets assembled,
    and no amount of model quality changes it.
 2. **The window's misses.** They are structural. A fact that fell outside an
    8k window is unrecoverable at any model quality — that is the point of the
@@ -98,10 +98,10 @@ position — so beating them proves less than it looks. These three retrieve:
 | detail buried in a long span | ok | ok | MISS | ok | ok |
 | corrected fact (very late) | ok | ok | ok | ok | ok |
 | **correct** | 5/7 | 5/7 | 1/7 | 4/7 | **7/7** |
-| **mean tokens/query** | 27,362 | 1,168 | 1,197 | 31,074 | **462** |
+| **mean tokens/query** | 27,362 | 1,168 | 1,197 | 31,074 | **145** |
 
 - **RAG ties full context at 5/7**, using the same hybrid index DCR uses, at
-  2.5x DCR's token cost. This is the honest headline: plain top-k retrieval is a
+  8x DCR's token cost. This is the honest headline: plain top-k retrieval is a
   strong baseline. The gap is two specific probes — a fact never repeated (there
   is nothing for similarity to latch onto) and an exact quote (top-k returns the
   right chunk, not the right bytes).
@@ -159,10 +159,15 @@ Same probes, same `B_attention = 800`, history scaled 33x:
 
 | turns | history | nodes | mean k | max k | correct | ingest | query | ann query | ann k |
 |---:|---:|---:|---:|---:|:---:|---:|---:|---:|---:|
-| 100 | 8,482 | 124 | 416.7 | 764 | 7/7 | 0.02s | 0.6ms | 0.5ms | 416.7 |
-| 300 | 27,362 | 298 | 411.6 | 787 | 7/7 | 0.05s | 1.4ms | 1.1ms | 451.7 |
-| 1,000 | 93,442 | 911 | 398.6 | 793 | 7/7 | 0.22s | 3.3ms | 2.6ms | 355.6 |
-| 3,000 | 283,253 | 2,661 | 413.3 | 795 | 7/7 | 1.02s | 12.6ms | 5.8ms | 346.9 |
+| 100 | 8,482 | 124 | 240.6 | 764 | 7/7 | 0.02s | 0.2ms | 0.2ms | 240.6 |
+| 300 | 27,362 | 298 | 145.1 | 249 | 7/7 | 0.05s | 0.2ms | 0.7ms | 267.1 |
+| 1,000 | 93,442 | 911 | 145.1 | 249 | 7/7 | 0.23s | 0.3ms | 1.7ms | 287.3 |
+| 3,000 | 283,253 | 2,661 | 145.1 | 249 | 7/7 | 1.10s | 1.0ms | 3.2ms | 278.3 |
+
+The 100-turn row is higher than every row below it, which is not noise: the seed
+floor is a fraction of the *top* hit, and on a small store the top hit is weaker,
+so the floor sits lower and admits more. The working set falls as the store grows
+and then holds exactly flat — 145.1 at 300, at 1,000 and at 3,000 turns.
 
 ### The range this table covers, and the range it does not
 
@@ -180,13 +185,21 @@ replacing it — every other figure here comes from the standard one.
 
 | turns | history | distinct | nodes | mean k | correct | ingest | query |
 |---:|---:|---:|---:|---:|:---:|---:|---:|
-| 3,000 | 150,648 | 3,000 | 2,032 | 196 | 7/7 | 0.4s | 2ms |
-| 10,000 | 512,964 | 10,000 | 6,762 | 220 | 7/7 | 4s | 5ms |
-| 30,000 | 1,564,065 | 18,445 | 18,473 | 197 | 7/7 | 15s | 11ms |
-| 80,000 | **4,191,322** | 18,445 | 48,651 | **235** | **7/7** | 178s | 33ms |
+| 3,000 | 150,648 | 3,000 | 2,032 | 219 | 7/7 | 1s | 6ms |
+| 10,000 | 512,964 | 10,000 | 6,762 | 237 | 7/7 | 16s | 5ms |
+| 30,000 | 1,564,065 | 18,445 | 18,473 | 221 | 7/7 | 78s | 47ms |
+| 80,000 | **4,191,322** | 18,445 | 48,651 | **259** | **7/7** | 251s | 22ms |
 
-**4.19 million tokens of history, 48,651 state nodes, 235 tokens per query, 7/7.**
-Across a 28x growth on this corpus the working set moves 196 → 235.
+**4.19 million tokens of history, 48,651 state nodes, 259 tokens per query, 7/7.**
+Across a 28x growth on this corpus the working set moves 219 → 259.
+
+Note what the seed floor does **not** do here. On the standard corpus raising it
+from 0.3 to 0.5 cut the working set from 461.9 tokens to 145.1; on this one the
+same change moved 196 → 219 at 3,000 turns, slightly *upward*. The floor is a
+fraction of the top hit, so its effect depends on the shape of each corpus's
+score distribution, and the 3x saving on the standard corpus is not a general
+property of the setting. Reported here rather than left for a reader to discover
+by running the harder corpus.
 
 Two limits, stated rather than left to be found. The generator exhausts its
 vocabulary at 18,432 combinations, so past ~18,000 turns documents begin to
@@ -241,13 +254,13 @@ not the seconds.
 
 **One inverted index failing is not the approach failing.** An earlier attempt
 was slower at scale *and* behaviour-changing — 457.1 tokens per query against
-461.9 — and was reverted. Unqualified, that reads as "indexing this does not
+461.9 under the then-default seed floor — and was reverted. Unqualified, that reads as "indexing this does not
 work", and the two results are opposite: that attempt **narrowed the candidate
 set**, which is why Table 3 moved; `live_by_key` **preserves** it and maintains
 it incrementally, which is why it is faster and neutral. The difference is the
 lesson, not the failure.
 
-History grew **33x**; active context grew **0.99x**, and accuracy held at 7/7 at
+History grew **33x**; active context grew **0.60x**, and accuracy held at 7/7 at
 every size. That is the `O(k + r)` shape from the cost model, measured rather
 than asserted — for the attention term. The `ann` columns are a second runtime
 over the same corpus with LSH pruning enabled; see the known gap below for what
@@ -266,22 +279,24 @@ poor fits in [use-cases](docs/use-cases.md) cite it.
 
 | variant | correct | mean k | esc. | probes that fail |
 |---|:---:|---:|---:|---|
-| full runtime | 7/7 | 461.9 | 0.14 | — |
-| no supersession | 5/7 | 640.9 | 0.14 | corrected fact (mid-history); corrected fact (late) |
-| no reference linking | 7/7 | 457.1 | 0.14 | — |
-| no escalation | 6/7 | 447.1 | 0.00 | detail buried in a long span |
-| no seed floor | 7/7 | 638.9 | 0.14 | — (costs 38% more tokens) |
-| no graph expansion | 7/7 | 242.0 | 0.14 | — (and 48% *cheaper*) |
-| L2 only (no ladder) | 5/7 | 381.4 | 0.00 | exact quote; detail buried in a long span |
-| harness cannot signal | 7/7 | 447.1 | 0.00 | — |
-| &nbsp;&nbsp;+ runtime infers it | 7/7 | 461.9 | 0.14 | — |
+| full runtime | 7/7 | 145.1 | 0.14 | — |
+| no supersession | 5/7 | 177.1 | 0.14 | corrected fact (mid-history); corrected fact (late) |
+| no reference linking | 7/7 | 140.7 | 0.14 | — (3% *cheaper*) |
+| no escalation | 6/7 | 130.4 | 0.00 | detail buried in a long span |
+| no seed floor | 7/7 | 638.9 | 0.14 | — (costs 4.4x the tokens) |
+| no graph expansion | 7/7 | 142.6 | 0.14 | — (and 2% *cheaper*) |
+| L2 only (no ladder) | 5/7 | 131.6 | 0.00 | exact quote; detail buried in a long span |
+| harness cannot signal | 7/7 | 130.4 | 0.00 | — |
+| &nbsp;&nbsp;+ runtime infers it | 7/7 | 145.1 | 0.14 | — |
 
 ### Two corrections this table makes to earlier claims
 
-**Reference linking is not a no-op.** Table 6 of the paper reported this row at
-461.9, identical to the full runtime, and called it "no effect on this corpus".
-It is 457.1. Correctness is unchanged, so the negative result stands, but the
-token column is not identical and the word "nothing" was wrong.
+**Reference linking is not a no-op.** Table 6 of the paper reported this row as
+identical to the full runtime and called it "no effect on this corpus". It is
+not identical — 140.7 against 145.1 — and it was further from identical under the
+old seed floor, where the gap was 457.1 against 461.9. Correctness is unchanged
+either way, so the negative result stands, but the token column moves and the
+word "nothing" was wrong.
 
 **The `no escalation` row was scored against a control token.** With
 `max_escalations = 0` the reasoner still emitted `#ESCALATE <node>`, nothing
@@ -318,7 +333,7 @@ is a third negative result alongside reference linking and graph expansion.
 `+ runtime infers it` enables `Dcr::auto_escalate`, which reconstructs the
 escalation decision inside the runtime from the query and the assembled window —
 the same `policy::overlap` function the reasoner uses, so the two cannot drift.
-It also scores 7/7, at 461.9 rather than 447.1. **It costs 15 tokens per query
+It also scores 7/7, at 145.1 rather than 130.4. **It costs 15 tokens per query
 and buys nothing measurable here.** It is off by default and is reported as a
 mechanism without a demonstrated benefit on this corpus, not as a fix.
 
