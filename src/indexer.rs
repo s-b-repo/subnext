@@ -743,7 +743,10 @@ impl StateIndexer {
     /// A live node of the same kind asserting the same thing.
     fn duplicate(&self, graph: &MemoryGraph, node: &Node) -> Option<NodeIdx> {
         let pool = match &node.key {
-            Some(key) => graph.by_key(key, true),
+            // Same non-superseded pool `by_key(key, true)` returns, but read
+            // from the maintained live index — no per-call bucket copy + sort.
+            // `.find` is order-independent, so no sort is needed here.
+            Some(key) => graph.live_by_key(key).to_vec(),
             None => graph.by_kind(node.kind, false),
         };
         pool.into_iter().find(|&idx| {
@@ -798,7 +801,10 @@ impl StateIndexer {
             return Vec::new();
         }
         graph
-            .by_key(key, true)
+            // Timestamp-sorted view: byte-identical order to by_key(key, true),
+            // so which node supersedes which is unchanged — over O(live), not
+            // the whole append-only bucket.
+            .live_by_key_sorted(key)
             .into_iter()
             .filter(|&idx| {
                 let other = graph.node(idx);

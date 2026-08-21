@@ -72,6 +72,13 @@ pub struct MemoryGraph {
     out_edges: Vec<Vec<Edge>>,
     in_edges: Vec<Vec<Edge>>,
     by_key: HashMap<String, Vec<NodeIdx>>,
+    /// Non-superseded nodes per key — the same pool `by_key(_, true)` filters
+    /// to, maintained incrementally so the hot ingest checks (`duplicate`,
+    /// `conflicts`) read O(live) instead of copying + sorting the whole
+    /// append-only `by_key` bucket every call. Membership boundary is
+    /// `status != Superseded` (so `Stale`/`Contradicted` stay in), matching
+    /// exactly what `by_key(key, true)` returns.
+    live_by_key: HashMap<String, Vec<NodeIdx>>,
     pub max_cascade: usize,
     pub max_depth: usize,
     /// Bumped on every mutation. The planner records it on an assembled
@@ -96,6 +103,7 @@ impl MemoryGraph {
             out_edges: Vec::new(),
             in_edges: Vec::new(),
             by_key: HashMap::new(),
+            live_by_key: HashMap::new(),
             max_cascade: 64,
             max_depth: 8,
             version: 0,
@@ -121,7 +129,13 @@ impl MemoryGraph {
     pub fn insert_restored(&mut self, node: Node) -> NodeIdx {
         let idx = self.nodes.len();
         if let Some(key) = node.key.clone() {
-            self.by_key.entry(key).or_default().push(idx);
+            self.by_key.entry(key.clone()).or_default().push(idx);
+            // Restored nodes carry their persisted status; only live ones join
+            // live_by_key, so a restored superseded node stays out — the
+            // in-memory maintenance and the rebuild-from-disk agree.
+            if node.status != Status::Superseded {
+                self.live_by_key.entry(key).or_default().push(idx);
+            }
         }
         self.by_id.insert(node.id.clone(), idx);
         self.nodes.push(node);
@@ -153,6 +167,23 @@ impl MemoryGraph {
                 let new_key = node.key.clone();
                 self.nodes[idx] = node;
                 self.reindex_key(idx, old_key.as_deref(), new_key.as_deref());
+                // The replacement is always live; keep live_by_key in step.
+                // reindex_key moved by_key on a key change but early-returns on
+                // an equal key, so the equal-key resurrection case (re-upserting
+                // over a superseded id) is handled here too.
+                if old_key != new_key {
+                    if let Some(k) = old_key.as_deref() {
+                        if let Some(list) = self.live_by_key.get_mut(k) {
+                            list.retain(|&i| i != idx);
+                        }
+                    }
+                }
+                if let Some(k) = new_key {
+                    let list = self.live_by_key.entry(k).or_default();
+                    if !list.contains(&idx) {
+                        list.push(idx);
+                    }
+                }
                 if changed {
                     self.invalidate(idx, false);
                 }
@@ -161,7 +192,9 @@ impl MemoryGraph {
             None => {
                 let idx = self.nodes.len();
                 if let Some(key) = node.key.clone() {
-                    self.by_key.entry(key).or_default().push(idx);
+                    self.by_key.entry(key.clone()).or_default().push(idx);
+                    // A newly inserted node is always live (Fresh/Unresolved).
+                    self.live_by_key.entry(key).or_default().push(idx);
                 }
                 self.by_id.insert(node.id.clone(), idx);
                 self.nodes.push(node);
@@ -260,7 +293,7 @@ impl MemoryGraph {
         self.add_edge(new, old, EdgeType::Supersedes);
         let old_id = self.nodes[old].id.clone();
         let new_id = self.nodes[new].id.clone();
-        self.nodes[old].status = Status::Superseded;
+        self.set_status(old, Status::Superseded);
         self.nodes[old].meta.superseded_by = Some(new_id);
         self.nodes[new].meta.supersedes.push(old_id.clone());
         // Supersession *resolves* the contradiction, so the survivor stops
@@ -323,7 +356,7 @@ impl MemoryGraph {
             // the status is what lets the state itself report the dispute
             // rather than leaving it to be inferred from the edges.
             if self.nodes[src].status == Status::Fresh {
-                self.nodes[src].status = Status::Contradicted;
+                self.set_status(src, Status::Contradicted);
             }
         }
     }
@@ -340,7 +373,7 @@ impl MemoryGraph {
             .filter_map(|id| self.by_id.get(id))
             .any(|&other| self.nodes[other].status.is_live());
         if !live {
-            self.nodes[idx].status = Status::Fresh;
+            self.set_status(idx, Status::Fresh);
         }
     }
 
@@ -373,7 +406,7 @@ impl MemoryGraph {
                 continue;
             }
             if self.nodes[current].kind != Kind::Evidence {
-                self.nodes[current].status = Status::Stale;
+                self.set_status(current, Status::Stale);
                 self.nodes[current].level_cache.borrow_mut().l3 = None;
             }
             marked.push(current);
@@ -407,7 +440,7 @@ impl MemoryGraph {
 
     /// Clear staleness once the node has been re-grounded or recomputed.
     pub fn revalidate(&mut self, idx: NodeIdx, clock: &Clock) {
-        self.nodes[idx].status = Status::Fresh;
+        self.set_status(idx, Status::Fresh);
         self.nodes[idx].timestamp = clock.tick();
         self.bump();
     }
@@ -423,6 +456,27 @@ impl MemoryGraph {
         }
         if let Some(key) = new_key {
             self.by_key.entry(key.to_string()).or_default().push(idx);
+        }
+    }
+
+    /// Set a node's status while keeping `live_by_key` consistent. Membership is
+    /// `status != Superseded`; only crossing that boundary moves the index.
+    fn set_status(&mut self, idx: NodeIdx, new: Status) {
+        let old = self.nodes[idx].status;
+        self.nodes[idx].status = new;
+        if (old != Status::Superseded) == (new != Status::Superseded) {
+            return; // no crossing of the live/superseded boundary
+        }
+        let Some(key) = self.nodes[idx].key.clone() else {
+            return;
+        };
+        let list = self.live_by_key.entry(key).or_default();
+        if new != Status::Superseded {
+            if !list.contains(&idx) {
+                list.push(idx);
+            }
+        } else {
+            list.retain(|&i| i != idx);
         }
     }
 
@@ -498,6 +552,37 @@ impl MemoryGraph {
             .collect();
         found.sort_by_key(|&i| self.nodes[i].timestamp);
         found
+    }
+
+    /// The non-superseded nodes for `key`, unsorted — the pool `by_key(key,
+    /// true)` returns, without the per-call bucket copy + filter + sort.
+    pub fn live_by_key(&self, key: &str) -> &[NodeIdx] {
+        self.live_by_key.get(key).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// `live_by_key`, copied and timestamp-sorted — byte-identical to
+    /// `by_key(key, true)` but over the O(live) set. For callers that observe
+    /// order (e.g. `conflicts`).
+    pub fn live_by_key_sorted(&self, key: &str) -> Vec<NodeIdx> {
+        let mut found = self.live_by_key(key).to_vec();
+        found.sort_by_key(|&i| self.nodes[i].timestamp);
+        // Debug-only, and legitimately so: an internal-invariant check that runs
+        // in debug test builds, NOT a control guarding a release-path claim. The
+        // maintenance it verifies (`set_status` + the insert/restore hooks) is
+        // identical in release, so a debug run that passes is sufficient; there
+        // is nothing here that must fire under `--release`. Positional `==` on
+        // two timestamp-sorted Vecs — it checks order, not just set membership.
+        debug_assert_eq!(
+            found,
+            self.by_key(key, true),
+            "live_by_key out of sync with by_key(key, true) for key {key:?}"
+        );
+        found
+    }
+
+    /// Every key currently indexed (live or superseded). Introspection/tests.
+    pub fn keys(&self) -> Vec<&str> {
+        self.by_key.keys().map(String::as_str).collect()
     }
 
     pub fn by_kind(&self, kind: Kind, fresh_only: bool) -> Vec<NodeIdx> {
