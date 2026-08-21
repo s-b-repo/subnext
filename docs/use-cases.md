@@ -138,7 +138,8 @@ also the cheapest thing here to re-run against your own material, which is the
 only way to answer the question for you.
 
 Then run `bench --diverse` if your histories are large, and read the note under
-it: the standard corpus emits 21 distinct documents at any size, so a large-token
+it: the standard corpus emits 21 distinct documents at any size — ten fixed, three
+corrections, eight noise templates — so a large-token
 figure from it measures length rather than difficulty.
 
 The check that separates the two costs one line — **does the count of distinct
