@@ -687,11 +687,15 @@ impl StateIndexer {
         let evidence_id = ctx.graph.node(evidence).id.clone();
         // Ingest cost, honestly: after the live_by_key change `duplicate` /
         // `conflicts` are O(live) and no longer the dominant term. `reference_links`
-        // (and `backfill_references` below) still scan every node per admitted fact
-        // — an O(N)-per-fact pass that leaves ingest super-quadratic at scale (at
-        // 6k standard-corpus turns it is ~35s where the diverse corpus does 30k docs
-        // in ~15s). That is the larger, unsolved cost; an inverted-index attempt on
-        // it was reverted as behaviour-changing (see git history). Not addressed here.
+        // (and `backfill_references` below) still scan every node per admitted fact.
+        // A load-independent count settles the shape the noisy wall-clock could not:
+        // node-visits across these two scans grow quadratically — x3.95 for a 2x
+        // corpus and x8.57 for 3x, per-fact visits scaling ~linearly with N (measured
+        // at 1k/3k/6k standard turns). So ingest WORK here is O(N^2) even though the
+        // measured *time* exponent is not robust under concurrent load. This is the
+        // larger, unsolved cost; a prior SET-NARROWING inverted-index attempt on it
+        // was reverted as behaviour-changing (this index is set-preserving, which is
+        // the difference — see git history). Not addressed here.
         let links = match self.reference_linking {
             true => self.reference_links(ctx.graph, &proposal.value, span_id),
             false => Vec::new(),
