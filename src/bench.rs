@@ -495,40 +495,60 @@ pub fn run_benchmark(turns: usize, budget: usize, window: usize) -> Result<(), D
 /// design whose parts can all be removed without changing the result does not
 /// need those parts.
 pub fn run_ablation(turns: usize, budget: usize) -> Result<(), DcrError> {
+    // `apply` configures the runtime *and* the harness, because two of these
+    // rows ablate the caller rather than the runtime: a model with no way to
+    // emit `#ESCALATE` is a property of the harness, and it is the documented
+    // poor fit the last two rows exist to price.
     struct Ablation {
         name: &'static str,
-        apply: fn(&mut Dcr),
+        apply: fn(&mut Dcr, &mut LocalReasoner),
     }
     let ablations = [
         Ablation {
             name: "full runtime",
-            apply: |_| {},
+            apply: |_, _| {},
         },
         Ablation {
             name: "no supersession",
-            apply: |rt| rt.indexer.supersede_on_conflict = false,
+            apply: |rt, _| rt.indexer.supersede_on_conflict = false,
         },
         Ablation {
             name: "no reference linking",
-            apply: |rt| rt.indexer.reference_linking = false,
+            apply: |rt, _| rt.indexer.reference_linking = false,
         },
         Ablation {
             name: "no escalation",
-            apply: |rt| rt.max_escalations = 0,
+            apply: |rt, _| rt.max_escalations = 0,
         },
         Ablation {
             name: "no seed floor",
-            apply: |rt| rt.planner.seed_min_ratio = 0.0,
+            apply: |rt, _| rt.planner.seed_min_ratio = 0.0,
         },
         Ablation {
             name: "no graph expansion",
-            apply: |rt| rt.planner.max_depth = 0,
+            apply: |rt, _| rt.planner.max_depth = 0,
         },
         Ablation {
             name: "L2 only (no ladder)",
-            apply: |rt| {
+            apply: |rt, _| {
                 rt.max_escalations = 0;
                 rt.ladder.flatten_to_l2 = true;
+            },
+        },
+        // The mechanism is still enabled; the harness simply cannot ask for it.
+        // This is the row the "reasoners that cannot signal" poor fit describes,
+        // and it should reproduce the "no escalation" result exactly. If it does
+        // not, the two are not measuring the same loss and the doc is wrong.
+        Ablation {
+            name: "harness cannot signal",
+            apply: |_, r| r.signal = false,
+        },
+        // Same harness, with the runtime inferring the request instead.
+        Ablation {
+            name: "  + runtime infers it",
+            apply: |rt, r| {
+                r.signal = false;
+                rt.auto_escalate = true;
             },
         },
     ];
@@ -548,11 +568,11 @@ pub fn run_ablation(turns: usize, budget: usize) -> Result<(), DcrError> {
 
     for ablation in ablations {
         let mut runtime = Dcr::new(budget);
-        (ablation.apply)(&mut runtime);
+        let mut reasoner = LocalReasoner::new();
+        (ablation.apply)(&mut runtime, &mut reasoner);
         for (doc_id, text) in &corpus.docs {
             runtime.ingest(text, Some(doc_id))?;
         }
-        let mut reasoner = LocalReasoner::new();
         let mut correct = 0usize;
         let mut failed: Vec<&str> = Vec::new();
         for probe in &corpus.probes {
@@ -2289,13 +2309,15 @@ pub fn run_stages(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
     println!("PLANNER STAGES - standard corpus, B_attention = {budget}, per query");
     println!();
     let header = format!(
-        "{:>7} {:>7} {:>10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>12}",
-        "turns", "nodes", "plan us", "seed", "expand", "pin", "score", "knap", "admit", "spans/q"
+        "{:>7} {:>7} {:>10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>12} {:>12}",
+        "turns", "nodes", "plan us", "seed", "expand", "pin", "score", "knap", "admit", "spans/q",
+        "L0 builds/q"
     );
     println!("{header}");
     println!("{}", "-".repeat(header.len()));
 
     let mut rows: Vec<(usize, usize, crate::planner::StageProfile, u64)> = Vec::new();
+    let mut last_memoised_spans = 0.0f64;
     for &turns in sizes {
         let corpus = build_corpus(turns);
         let mut runtime = Dcr::new(budget);
@@ -2312,9 +2334,10 @@ pub fn run_stages(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
         }
         let plans = runtime.plans.max(1);
         let p = runtime.planning;
+        let l0_builds = runtime.ladder.l0_builds();
         let per = |d: std::time::Duration| d.as_secs_f64() * 1e6 / plans as f64;
         println!(
-            "{turns:>7} {:>7} {:>10.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>12.0}",
+            "{turns:>7} {:>7} {:>10.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>12.0} {:>12.2}",
             runtime.graph.len(),
             per(p.total()),
             per(p.seed_time),
@@ -2324,7 +2347,9 @@ pub fn run_stages(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
             per(p.knapsack_time),
             per(p.admit_time),
             p.score_spans_priced as f64 / plans as f64,
+            l0_builds as f64 / plans as f64,
         );
+        last_memoised_spans = runtime.ladder.l0_build_spans() as f64 / plans as f64;
         rows.push((turns, runtime.graph.len(), p, plans));
     }
 
@@ -2380,6 +2405,34 @@ pub fn run_stages(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
                 / (first.2.pin_scanned as f64 / first.3.max(1) as f64).max(1.0),
         );
     }
+    // The memo off, at the largest size. A speed-up nobody can make disappear
+    // on purpose is not a measured speed-up, and on a loaded machine the clocks
+    // above cannot show it — so the comparison is in spans concatenated, which
+    // is deterministic.
+    if let Some(&largest) = sizes.last() {
+        let corpus = build_corpus(largest);
+        let mut off = Dcr::new(budget);
+        off.ladder.memoise_l0 = false;
+        for (doc_id, text) in &corpus.docs {
+            off.ingest(text, Some(doc_id))?;
+        }
+        off.plans = 0;
+        let before = off.ladder.l0_build_spans();
+        let mut reasoner = LocalReasoner::new();
+        for probe in &corpus.probes {
+            let _ = off.ask_with(probe.query, None, &mut reasoner);
+        }
+        let plans = off.plans.max(1);
+        let spans_off = (off.ladder.l0_build_spans() - before) as f64 / plans as f64;
+        println!();
+        println!(
+            "Control, {largest} turns: with the L0 memo disabled the planner concatenates\n\
+             {spans_off:.0} source spans per query; with it enabled, {:.0}. The memo is what\n\
+             stops a candidate set capped at 120 from doing work linear in history.",
+            last_memoised_spans,
+        );
+    }
+
     println!();
     println!(
         "Timings are single-run on one machine and carry the spread every other timing\n\

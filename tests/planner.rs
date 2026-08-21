@@ -185,3 +185,61 @@ fn explain_plan_shows_the_arithmetic() {
     assert!(text.contains("ADMIT"));
     assert!(text.contains("similarity="));
 }
+
+/// The L0 memo must be a pure speed-up: same costs, same levels, same plan.
+///
+/// `Ladder::memoise_l0 = false` exists so the saving can be made to disappear
+/// on purpose, but a control nobody runs is a control that never fires — the
+/// same shape as the metric that could not report a failure and the ablation
+/// row that could not pass. This runs it.
+#[test]
+fn the_l0_memo_changes_costs_for_no_node() {
+    let mut memoised = runtime();
+    let mut direct = runtime();
+    direct.ladder.memoise_l0 = false;
+
+    for query in [
+        "what is the server ip?",
+        "quote the exact error message",
+        "why was the payment service not restarted?",
+        "what is the deploy window?",
+    ] {
+        let a = memoised.plan(query, None);
+        let b = direct.plan(query, None);
+        assert_eq!(
+            a.tokens, b.tokens,
+            "memo changed the plan cost for {query:?}"
+        );
+        assert_eq!(
+            a.node_ids(),
+            b.node_ids(),
+            "memo changed which nodes were admitted for {query:?}"
+        );
+        let levels: Vec<Level> = a.entries.iter().map(|e| e.level).collect();
+        let direct_levels: Vec<Level> = b.entries.iter().map(|e| e.level).collect();
+        assert_eq!(levels, direct_levels, "memo changed levels for {query:?}");
+    }
+}
+
+/// And the flag has to actually do something, or the test above is vacuous.
+#[test]
+fn disabling_the_l0_memo_restores_the_repeated_work() {
+    let mut rt = runtime();
+    rt.ladder.memoise_l0 = false;
+    let before = rt.ladder.l0_builds();
+    rt.plan("what is the server ip?", None);
+    let uncached = rt.ladder.l0_builds() - before;
+
+    let mut rt = runtime();
+    let before = rt.ladder.l0_builds();
+    rt.plan("what is the server ip?", None);
+    rt.plan("what is the server ip?", None);
+    let cached = rt.ladder.l0_builds() - before;
+
+    assert!(
+        cached < uncached,
+        "two memoised plans ({cached} builds) should cost fewer concatenations \
+         than one unmemoised plan ({uncached} builds); if they do not, the memo \
+         is not doing anything and neither is the flag"
+    );
+}

@@ -247,6 +247,31 @@ pub struct LevelCache {
     pub l1: Option<String>,
     pub l2: Option<Vec<f32>>,
     pub l3: Option<f64>,
+    /// Sizes of this node's L0 material. See [`L0Sizes`].
+    pub l0_sizes: Option<L0Sizes>,
+}
+
+/// The two token counts the planner needs from a node's raw spans, memoised.
+///
+/// Both were recomputed for every candidate of every plan, and computing
+/// either means concatenating the node's entire span list. Corroboration grows
+/// that list with history, so the planner's scoring stage was doing work linear
+/// in N over a candidate set capped at 120 — which is how "planning cost grows
+/// with N" survived a candidate cap that should have bounded it.
+///
+/// Neither count is persisted: both are memos of a derivable quantity, and a
+/// stored one would have to be trusted against a span list that reloads
+/// separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct L0Sizes {
+    /// `(source span count, value length)` — everything the counts below
+    /// depend on. Stored so the memo invalidates itself when new corroboration
+    /// lands or the value is revised, rather than going quietly stale.
+    pub key: (usize, usize),
+    /// Tokens in the concatenated span text. Decides whether L1 is offered.
+    pub raw_tokens: usize,  // audit-allow: LM token count, not a credential
+    /// Tokens in the *rendered* L0 admission. Prices it for the knapsack.
+    pub rendered_cost: usize,
 }
 
 #[derive(Debug)]

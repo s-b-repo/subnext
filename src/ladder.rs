@@ -21,7 +21,7 @@
 use std::cell::Cell;
 
 use crate::embed::{DIM, cosine, hashing_embed};
-use crate::nodes::{Kind, Node, Origin, Status};
+use crate::nodes::{Kind, L0Sizes, Node, Origin, Status};
 use crate::spans::RawStore;
 use crate::summarize::ExtractiveSummarizer;
 use crate::text::clip;
@@ -89,6 +89,21 @@ pub struct Ladder {
     /// Collapse the ladder to a single level - the ablation that asks what the
     /// other three levels are actually buying.
     pub flatten_to_l2: bool,
+    /// Times the L0 span concatenation has actually been performed.
+    ///
+    /// Deterministic, unlike a clock, which matters here: the cost this
+    /// memoises is what made the planner super-linear, and on a shared machine
+    /// the timings carry enough spread to hide the difference. This counter
+    /// does not.
+    l0_builds: Cell<usize>,
+    /// Source spans concatenated by those builds.
+    l0_build_spans: Cell<usize>,
+    /// Whether [`Self::l0_sizes`] may reuse its memo.
+    ///
+    /// Exists so the memo can be turned off and the cost it removes measured
+    /// rather than asserted. A speed-up nobody can make disappear on purpose
+    /// is not a measured speed-up.
+    pub memoise_l0: bool,
     builds: Cell<Builds>,
 }
 
@@ -99,6 +114,9 @@ impl Default for Ladder {
             estimator: Estimator::default(),
             dim: DIM,
             flatten_to_l2: false,
+            l0_builds: Cell::new(0),
+            l0_build_spans: Cell::new(0),
+            memoise_l0: true,
             builds: Cell::new(Builds::default()),
         }
     }
@@ -129,15 +147,55 @@ impl Ladder {
         }
     }
 
+    /// Both L0 token counts, built once per node and reused. See [`L0Sizes`].
+    ///
+    /// This is the planner's dominant cost made cheap. `available()` and
+    /// `cost()` are each called for every candidate of every plan, and both
+    /// concatenated the node's whole span list — one to compare a length
+    /// against 40, the other to price an admission that would usually be
+    /// dropped. They are computed together because they share that
+    /// concatenation.
+    /// How many times the L0 span concatenation has run. See [`Self::l0_builds`].
+    pub fn l0_builds(&self) -> usize {
+        self.l0_builds.get()
+    }
+
+    /// Source spans concatenated across those builds — the work itself, rather
+    /// than the number of times it was entered.
+    pub fn l0_build_spans(&self) -> usize {
+        self.l0_build_spans.get()
+    }
+
+    pub fn l0_sizes(&self, raw: &RawStore, node: &Node) -> L0Sizes {
+        let key = (node.source_spans.len(), node.value.len());
+        if self.memoise_l0 {
+            if let Some(sizes) = node.level_cache.borrow().l0_sizes {
+                if sizes.key == key {
+                    return sizes;
+                }
+            }
+        }
+        self.l0_builds.set(self.l0_builds.get() + 1);
+        self.l0_build_spans
+            .set(self.l0_build_spans.get() + node.source_spans.len());
+        let text = self.raw_text(raw, node);
+        let sizes = L0Sizes {
+            key,
+            raw_tokens: self.estimator.count(&text),
+            rendered_cost: self.estimator.count(&Self::l0_render(node, &text)),
+        };
+        node.level_cache.borrow_mut().l0_sizes = Some(sizes);
+        sizes
+    }
+
+    fn l0_render(node: &Node, text: &str) -> String {
+        format!("[{} L0 {}] \"{}\"", node.id, node.label(), text)
+    }
+
     /// The payload the model sees for this node at this level.
     pub fn render(&self, raw: &RawStore, node: &Node, level: Level) -> String {
         match level {
-            Level::L0 => format!(
-                "[{} L0 {}] \"{}\"",
-                node.id,
-                node.label(),
-                self.raw_text(raw, node)
-            ),
+            Level::L0 => Self::l0_render(node, &self.raw_text(raw, node)),
             Level::L1 => format!(
                 "[{} L1 {}] {}",
                 node.id,
@@ -247,6 +305,13 @@ impl Ladder {
 
     // -- costing -----------------------------------------------------------
     pub fn cost(&self, raw: &RawStore, node: &Node, level: Level) -> usize {
+        // L0 is priced from the memo rather than by rendering: the render is a
+        // full concatenation of the node's spans, and the planner prices every
+        // candidate at every available level before the knapsack drops most of
+        // them.
+        if level == Level::L0 {
+            return self.l0_sizes(raw, node).rendered_cost;
+        }
         let text = self.render(raw, node, level);
         if text.is_empty() {
             0
@@ -263,7 +328,7 @@ impl Ladder {
         let mut levels = vec![Level::L2];
         if !node.source_spans.is_empty() {
             levels.push(Level::L0);
-            if self.estimator.count(&self.raw_text(raw, node)) > 40 {
+            if self.l0_sizes(raw, node).raw_tokens > 40 {
                 levels.push(Level::L1);
             }
         }
