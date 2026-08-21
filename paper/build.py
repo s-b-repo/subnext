@@ -116,7 +116,7 @@ def to_pdf(source: Path, pdf: Path) -> bool:
 SITE_DESCRIPTION = (
     "A runtime that separates unbounded history from bounded attention: a "
     "representation ladder, a provenance graph, and a budgeted context planner. "
-    "Measured at 467 tokens per query over a 27,362-token transcript, flat across "
+    "Measured at 145 tokens per query over a 27,362-token transcript, flat across "
     "33x history growth."
 )
 
@@ -151,8 +151,8 @@ def build_site(site_dir: Path) -> Path:
         <a class="btn btn-ghost" href="research.html">All research <span aria-hidden="true">&rarr;</span></a>
       </div>
       <ul class="hero-stats reveal" aria-label="At a glance">
-        <li><b>467</b><span>tokens per query</span></li>
-        <li><b>59&times;</b><span>less than full history</span></li>
+        <li><b>145</b><span>tokens per query</span></li>
+        <li><b>189&times;</b><span>less than full history</span></li>
         <li><b>7 / 7</b><span>probes answered</span></li>
         <li><b>Rust</b><span>zero dependencies</span></li>
       </ul>

@@ -23,8 +23,8 @@
         <h3>Dynamic Context Runtime: Bounded Attention over Unbounded History</h3>
         <p>Language models degrade as stale and superseded material piles up in their context. Making the window bigger does not fix it. This report describes a runtime that keeps history unbounded and attention bounded &mdash; storing everything as immutable spans and a typed provenance graph, then assembling a small working set each turn by solving a knapsack under an explicit token budget. It includes a zero-dependency Rust implementation and an ablation that names which mechanisms are actually carrying the result.</p>
         <ul class="hero-stats" aria-label="At a glance">
-          <li><b>467</b><span>tokens per query</span></li>
-          <li><b>59&times;</b><span>less than full history</span></li>
+          <li><b>145</b><span>tokens per query</span></li>
+          <li><b>189&times;</b><span>less than full history</span></li>
           <li><b>7 / 7</b><span>probes answered</span></li>
           <li><b>33&times;</b><span>history growth, flat cost</span></li>
         </ul>
