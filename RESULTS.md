@@ -213,13 +213,31 @@ now separated:
   scan per proposed fact, present in both corpora. Not fixed; noted at the call
   site in `92f216b`.
 
-**The exponent is not a stable number, and saying so is worth more than either
-measurement.** Against `c68d472^` under heavy load: 0.73s → 5.83s → 40.14s at
-1,000 / 3,000 / 6,000 turns, growing 8.0× then 6.9×. At a later revision under
-light load: 0.24s → 1.11s → 3.76s, growing 4.6× then 3.4× — *sub*-quadratic at
-the step where the first run is firmly super-quadratic. Both agree ingest grows
-faster than the corpus does; they disagree by how much, and the disagreement
-tracks machine load rather than code. Super-linear is what we state.
+**The work is quadratic; the wall-clock is not a reliable ruler for it.** Two of
+us measured elapsed time and disagreed. Against `c68d472^` under heavy load:
+0.73s → 5.83s → 40.14s at 1,000 / 3,000 / 6,000 turns, growing 8.0× then 6.9×.
+At a later revision under light load: 0.24s → 1.11s → 3.76s, growing 4.6× then
+**3.4×** — *sub*-quadratic at exactly the step where the first run is firmly
+super-quadratic.
+
+Counting node-visits in the two linking scans settles it, because a count does
+not move with load:
+
+| turns | node-visits | per fact | growth |
+|---:|---:|---:|---|
+| 1,000 | 1,002,300 | 1,002 | — |
+| 3,000 | 8,584,863 | 2,862 | 8.57× for a 3× corpus |
+| 6,000 | 33,914,820 | 5,652 | 3.95× for a 2× corpus |
+
+against quadratic predictions of 9× and 4×. Per-fact visits scale linearly with
+`N`, so total work is **Θ(N²)** — and that is required by the code rather than
+merely observed in it: `reference_links` and `backfill_references` each iterate
+`graph.nodes()` once per proposed fact.
+
+So the split is **quadratic work, unreliable timing**. Both wall-clock runs were
+the same quadratic code seen through an instrument that moves with load, which
+is why neither could settle the question and the count can. Quote the visits,
+not the seconds.
 
 **One inverted index failing is not the approach failing.** An earlier attempt
 was slower at scale *and* behaviour-changing — 457.1 tokens per query against
