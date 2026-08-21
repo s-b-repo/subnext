@@ -142,6 +142,21 @@ including one of the five. What is uniform is not who did the catching but the
 comparison of two artefacts. **Re-reading a claim caught nothing, for anyone, at
 any point today.**
 
+A fourth shape, distinct from the other three and harder to see than any of
+them: **a check that answers a neighbouring question.** Verifying that a
+sentence had reached the published PDF, a probe reported it absent. It was
+present — the phrase straddled a column break, and the extractor puts a form
+feed between the halves. The check was not broken and did not fail silently. It
+answered "does this exact byte sequence occur", which is not the question asked,
+which was "did this text reach the page". The two agree until the layout moves.
+It is the same defect as a control that cannot fire, arriving from the other
+side, and it is worse to spot because it is right almost all of the time. The
+same cause produced three false alarms in one day, and the first two were each
+diagnosed correctly and filed as one-offs rather than as a pattern.
+
+The remedy is narrow and mechanical: probe with a short fragment and print the
+surrounding context. Never trust the boolean.
+
 And memory is not one of the instruments. It is a lossy copy of the first
 reading, and it is the copy that agrees with you — which is why the cheapest
 failure of the day was a claim contradicted by a list in the same document,
