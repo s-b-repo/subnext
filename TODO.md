@@ -519,6 +519,15 @@ tokens per query more. It is off by default and is **not** claimed as a fix.
   The remaining concatenations still walk span lists that grow, `by_kind` still
   scans every node once per pinned kind per query, and the cost model still
   needs an end-to-end claim it does not have.
+- **A paraphrase probe set.** `bench --channels` now measures how much the
+  lexical and vector channels agree (2.7x chance overlap, and 195 of 220 ranked
+  positions surfaced by exactly one channel), which corrects an overstated
+  sentence. It does not measure what the poor fit rests on: the seven probes
+  were written to be answerable by vocabulary overlap, which is the condition
+  under which a hashing embedder most agrees with BM25. Probes whose query and
+  document share meaning but not vocabulary are the missing measurement. Watch
+  for the `NOISE` vocabulary collision recorded in item 11 — probe vocabulary
+  that collides with the noise generator measures the collision.
 - **The 96% pruning figure is corpus-bound.** It was measured on the standard
   generator, which emits 21 distinct documents at any size, so it does not
   separate pruned vectors from pruned near-duplicates
