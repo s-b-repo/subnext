@@ -171,21 +171,30 @@ hashing embedding, not a learned one. It finds material that shares vocabulary.
 Genuine paraphrase retrieval needs a real embedding model swapped in — the
 interface takes any `str -> Vec<f32>`.
 
-**Reasoners that cannot signal.** The escalation protocol assumes the model can
-say "this compressed form is insufficient, give me the source". A model or
-harness with no way to emit that signal loses the mechanism that carries the
-exact-quote and buried-detail probes.
+**~~Reasoners that cannot signal.~~ Retracted.** This said a harness unable to
+emit `#ESCALATE` loses the exact-quote and buried-detail probes, citing the
+ablation's 6/7. That row was grading the unserved protocol token as the answer,
+so it could not have passed. Measured properly — reasoner cannot signal, runtime
+keeps the mechanism — correctness is 7/7: the router sends `QuoteExact` to L0 at
+plan time, and the buried detail survives the L1 summary. Struck through rather
+than deleted because it stood here as a reason not to use this.
+[The full retraction](docs/use-cases.md#reasoners-that-cannot-signal--retracted).
 
 **High-concurrency writes.** The consistency path is exercised and priced
 (`bench --consolidate`) but it is single-threaded. Nothing here runs two turns
 at once and no lock is exercised. Do not deploy it under concurrent ingest on
 the strength of these numbers.
 
-**Very large N where planning cost matters.** Retrieval is no longer the
-bottleneck — an LSH index prunes ~96% of scored vectors — but query latency still
-grows, and the remaining cost is in the planner. At 4.19M tokens that is 33ms per
-query, which is fine; whether it stays fine an order of magnitude further up is
-not established.
+**Very large N where planning cost matters.** Retrieval is not the bottleneck —
+an LSH index prunes ~96% of scored vectors, on the corpus with 21 distinct
+documents, which does not separate pruned vectors from pruned duplicates. The
+cost was in the planner, and `bench --stages` now clocks each stage separately
+and publishes what it rejected. Scoring dominated and grew with history despite a
+candidate set capped at 120: `available()` and `cost()` each concatenated a
+node's whole span list, and corroboration grows that list with N — 3,529 spans
+concatenated per query at 3,000 turns, now 612. That is a constant factor, not a
+change of complexity. Planning is still not shown to be sub-linear and `O(k + r)`
+remains established for attention only.
 
 ### If you are evaluating it
 

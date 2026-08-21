@@ -216,6 +216,120 @@ Storage still grows `O(N)` — 124 → 2,661 nodes. The claim is bounded
 
 ---
 
+## Which mechanisms carry which probes
+
+`bench --ablate`, 300 turns, `B_attention = 1200`. One mechanism disabled per
+row. This table lived only in the paper until now; it is here because two of the
+poor fits in [use-cases](docs/use-cases.md) cite it.
+
+| variant | correct | mean k | esc. | probes that fail |
+|---|:---:|---:|---:|---|
+| full runtime | 7/7 | 461.9 | 0.14 | — |
+| no supersession | 5/7 | 640.9 | 0.14 | corrected fact (mid-history); corrected fact (late) |
+| no reference linking | 7/7 | 457.1 | 0.14 | — |
+| no escalation | 6/7 | 447.1 | 0.00 | detail buried in a long span |
+| no seed floor | 7/7 | 638.9 | 0.14 | — (costs 38% more tokens) |
+| no graph expansion | 7/7 | 242.0 | 0.14 | — (and 48% *cheaper*) |
+| L2 only (no ladder) | 5/7 | 381.4 | 0.00 | exact quote; detail buried in a long span |
+| harness cannot signal | 7/7 | 447.1 | 0.00 | — |
+| &nbsp;&nbsp;+ runtime infers it | 7/7 | 461.9 | 0.14 | — |
+
+### Two corrections this table makes to earlier claims
+
+**Reference linking is not a no-op.** Table 6 of the paper reported this row at
+461.9, identical to the full runtime, and called it "no effect on this corpus".
+It is 457.1. Correctness is unchanged, so the negative result stands, but the
+token column is not identical and the word "nothing" was wrong.
+
+**The `no escalation` row was scored against a control token.** With
+`max_escalations = 0` the reasoner still emitted `#ESCALATE <node>`, nothing
+consumed it, and the literal string `#ESCALATE clai_e36d7d2dd2bb` was returned
+as the turn's answer — then scored for whether it contained the expected value.
+The row could not have passed however reachable the answer was. A control that
+cannot pass carries as little information as one that cannot fail, and this repo
+has now found the same shape three times.
+
+The runtime no longer returns an unserved escalation as an answer (it returns
+the same "not in the active context" sentence the reasoner uses, and sets
+`Answer::escalation_refused`). The row still reads 6/7, because the refusal is
+still not the expected value — but it now fails for the reason the row is
+supposed to be testing.
+
+### The last two rows, and what they retract
+
+`no escalation` disables the *runtime's* willingness to serve. The documented
+poor fit is a different configuration: a **harness that cannot ask**. Those were
+treated as the same thing and they are not.
+
+`harness cannot signal` is the poor fit as written — `LocalReasoner::signal =
+false`, so `#ESCALATE` is never emitted, while the runtime keeps the mechanism
+enabled. It scores **7/7**. The buried-detail probe is answered from the L1
+summary (`"exhausted after 7 attempts"`), and the exact-quote probe is carried by
+the query-type router, which sends `QuoteExact` to L0 at plan time without any
+model signal.
+
+So the claim that a signal-less harness "loses the mechanism that carries the
+exact-quote and buried-detail probes" **does not reproduce**. On this corpus
+escalation carries nothing the router and the ladder do not already carry. That
+is a third negative result alongside reference linking and graph expansion.
+
+`+ runtime infers it` enables `Dcr::auto_escalate`, which reconstructs the
+escalation decision inside the runtime from the query and the assembled window —
+the same `policy::overlap` function the reasoner uses, so the two cannot drift.
+It also scores 7/7, at 461.9 rather than 447.1. **It costs 15 tokens per query
+and buys nothing measurable here.** It is off by default and is reported as a
+mechanism without a demonstrated benefit on this corpus, not as a fix.
+
+What would change that verdict is a probe whose answer exists only in raw bytes
+that no router keyword reaches. The corpus does not currently contain one.
+
+---
+
+## Where planning time goes
+
+`bench --stages`. Every latency figure in this file before this section was
+measured at the outer edge of a turn, which made "planning" a residual rather
+than a measurement — and that is how the previous, confidently wrong diagnosis
+("the vector index is a linear scan") survived. The instrument was proposed by
+[@cwahq](https://www.moltbook.com/post/78237a57-17ef-4c78-b05f-8c1e5a944196):
+separate clocks per stage, and publish the rejected-candidate count at each one.
+
+The clocks say scoring dominates and grows with history. The load-bearing column
+is not a clock, though — timings on a shared machine carry more spread than the
+effect. It is **source spans concatenated per query**, which is deterministic:
+
+| turns | nodes | spans concatenated / query | L0 builds / query |
+|---:|---:|---:|---:|
+| 100 | 124 | 36 | 6.1 |
+| 300 | 298 | 113 | 6.9 |
+| 1,000 | 911 | 272 | 6.5 |
+| 3,000 | 2,661 | 1,177 | 7.0 |
+
+The candidate set is hard-capped at 120 and the rejection counts confirm the cap
+never binds — so the planner was doing work linear in history over a *bounded*
+number of candidates. The cause: `Ladder::available()` concatenated a node's
+entire span list to compare its length against 40, and `Ladder::cost()`
+concatenated it again to price an L0 admission the knapsack usually drops.
+Corroboration collapses agreeing spans behind one node, so that list grows with
+N. Both counts are now memoised on the node (`LevelCache::l0_sizes`, keyed on
+span count and value length so new corroboration invalidates it).
+
+The control, because a speed-up nobody can make disappear on purpose is not a
+measured speed-up — `Ladder::memoise_l0 = false` restores the old behaviour:
+
+```
+Control, 3000 turns: with the L0 memo disabled the planner concatenates
+3529 source spans per query; with it enabled, 612.
+```
+
+**This is a constant-factor result, not a complexity result.** The number of
+concatenations per query is now flat in N (6.1 → 7.0), but each remaining build
+still walks a span list that grows, so 612 is not 36. Planning has not been
+shown to be sub-linear and the `O(k + r)` claim is still unestablished end to
+end. What changed is that the cost now has a name and a clock on it.
+
+---
+
 ## Workspace rebuild
 
 "Destroy and rebuild the workspace at any time" is only a guarantee if rebuild

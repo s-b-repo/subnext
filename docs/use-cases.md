@@ -95,13 +95,43 @@ therefore correlated rather than independent evidence. Genuine paraphrase
 retrieval needs a real embedding model swapped in; the interface accepts any
 `str -> Vec<f32>`.
 
-### Reasoners that cannot signal
+### ~~Reasoners that cannot signal~~ — retracted
 
-The [escalation protocol](architecture/decision-policy.md) assumes the model can
-say "this compressed form is insufficient, give me the source". A harness with no
-way to emit that signal loses the mechanism that carries the exact-quote and
-buried-detail probes — the ablation shows correctness dropping to 6/7 with
-escalation disabled.
+**This entry was wrong, and the measurement it cited was measuring something
+else.** It is struck through rather than deleted because it stood here as a
+reason not to use the system.
+
+The claim was that a harness with no way to emit `#ESCALATE` loses the
+mechanism carrying the exact-quote and buried-detail probes, citing the
+ablation's 6/7. But `no escalation` sets the runtime's escalation budget to
+zero, which does not stop the reasoner *asking* — it stops the runtime
+*serving*. The unserved protocol token was then returned as the turn's answer
+and graded against the expected value, so on the buried-detail probe the graded
+answer was the literal string `#ESCALATE clai_e36d7d2dd2bb`. The row could not
+have passed however reachable the answer was.
+
+`bench --ablate` now measures the configuration this entry described — the
+reasoner cannot emit the signal, the runtime keeps the mechanism enabled — and
+it scores **7/7**. The buried-detail probe is answered from the L1 summary, and
+the exact-quote probe is carried by the query-type router, which routes
+`QuoteExact` to L0 at plan time without any model signal. On this corpus,
+escalation carries nothing the router and the ladder do not already carry.
+
+Two things remain true and are the reason this is a retraction rather than a
+reversal. A probe whose answer exists only in raw bytes that no router keyword
+reaches would still need the signal, and the corpus does not contain one — so
+this is "not demonstrated to matter here", not "cannot matter". And the runtime
+no longer returns an unserved escalation as an answer; it returns the same
+"not in the active context" sentence the reasoner uses and sets
+`Answer::escalation_refused`, so the degraded path is visible to the caller
+rather than arriving as a control token.
+
+`Dcr::auto_escalate` reconstructs the escalation decision inside the runtime
+from the query and the assembled window, using the same `policy::overlap`
+function the reasoner uses so the two cannot drift. It also scores 7/7, at 461.9
+tokens against 447.1 — **15 tokens per query for no measurable gain on this
+corpus.** It is off by default and is not offered as a fix for anything
+currently demonstrated.
 
 ### High-concurrency writes
 
@@ -113,12 +143,35 @@ of these numbers.
 
 ### Very large N where planning cost matters
 
-Retrieval is no longer the bottleneck: an LSH index prunes roughly 96% of scored
-vectors and the index call drops to a fraction of a millisecond. Query latency
-still grows, and the remaining cost is in the planner. At 4.19M tokens that is
-33ms per query, which is fine. Whether it stays fine an order of magnitude
-further up is not established, and is
-[an open question](open-questions.md).
+Retrieval is not the bottleneck. An LSH index prunes roughly 96% of the vectors
+a query scores and takes the index call to a fraction of a millisecond — a
+figure measured on the *standard* corpus, which emits 21 distinct documents at
+any size, so it does not separate "pruned vectors" from "pruned near-duplicates"
+and should not be read as though it did.
+
+The cost was in the planner, and `bench --stages` now says where. Each stage has
+its own clock and publishes what it rejected, an instrument proposed by
+[@cwahq](https://www.moltbook.com/post/78237a57-17ef-4c78-b05f-8c1e5a944196).
+Scoring dominated, and it grew with history even though the candidate set is
+hard-capped at 120 and the rejection counts confirm the cap never binds. The
+cause was that `Ladder::available()` concatenated a node's entire span list to
+compare its length against 40, and `Ladder::cost()` concatenated it again to
+price an L0 admission the knapsack usually drops. Corroboration collapses
+agreeing spans behind one node, so that list grows with N: at 3,000 turns the
+planner was concatenating 3,529 source spans per query over 120 candidates.
+
+Both counts are now memoised on the node, keyed so that new corroboration
+invalidates them, and the same query concatenates 612. The memo can be disabled
+(`Ladder::memoise_l0 = false`) so the saving can be made to disappear on purpose
+rather than asserted.
+
+**This is a constant factor, not a change of complexity.** Concatenations per
+query are now flat in N, but each remaining one still walks a span list that
+grows. Planning has not been shown to be sub-linear, the `O(k + r)` claim is
+still established for attention and unestablished end to end, and whether 33ms
+per query at 4.19M tokens stays fine an order of magnitude further up is
+[an open question](open-questions.md). What changed is that the cost now has a
+name and a clock on it instead of being the residual left after retrieval.
 
 ---
 
