@@ -198,12 +198,36 @@ grows, not whether `k` holds as the number of things worth knowing grows.
 ### The cost result revises the one above it
 
 Standard corpus at 30,000 turns: 226s ingest, 169ms query. Diverse corpus at the
-same document count: 15s and 11ms. Ingest on the standard generator is dominated
-by comparing each arriving document against thousands of near-duplicates, so the
-super-quadratic growth first attributed to the linking passes is largely a
-property of the corpus. An inverted index built to fix it was slower at scale
-*and* behaviour-changing — 457.1 tokens per query against 461.9 — and was
-reverted rather than published.
+same document count: 15s and 11ms. The corpus **amplifies** that cost rather than being it: few reused keys
+concentrate work into a handful of large buckets. An earlier version of this
+paragraph said the growth was "largely a property of the corpus", which
+overcorrected in the opposite direction from the claim it replaced. Three parts,
+now separated:
+
+- **`by_key`'s whole-bucket copy, filter and sort was a real cost, and is gone.**
+  A `live_by_key` index over the non-superseded nodes per key (`c68d472`) is
+  faster at every size against its own parent and behaviour-neutral across all
+  six deterministic checks.
+- **It was not the dominant cost.** Removing it bought 1.2–1.8×.
+- **`reference_links` / `backfill_references` own what remains** — a full-node
+  scan per proposed fact, present in both corpora. Not fixed; noted at the call
+  site in `92f216b`.
+
+**The exponent is not a stable number, and saying so is worth more than either
+measurement.** Against `c68d472^` under heavy load: 0.73s → 5.83s → 40.14s at
+1,000 / 3,000 / 6,000 turns, growing 8.0× then 6.9×. At a later revision under
+light load: 0.24s → 1.11s → 3.76s, growing 4.6× then 3.4× — *sub*-quadratic at
+the step where the first run is firmly super-quadratic. Both agree ingest grows
+faster than the corpus does; they disagree by how much, and the disagreement
+tracks machine load rather than code. Super-linear is what we state.
+
+**One inverted index failing is not the approach failing.** An earlier attempt
+was slower at scale *and* behaviour-changing — 457.1 tokens per query against
+461.9 — and was reverted. Unqualified, that reads as "indexing this does not
+work", and the two results are opposite: that attempt **narrowed the candidate
+set**, which is why Table 3 moved; `live_by_key` **preserves** it and maintains
+it incrementally, which is why it is faster and neutral. The difference is the
+lesson, not the failure.
 
 History grew **33x**; active context grew **0.99x**, and accuracy held at 7/7 at
 every size. That is the `O(k + r)` shape from the cost model, measured rather
