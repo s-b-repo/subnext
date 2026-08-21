@@ -598,7 +598,9 @@ this design, which is the reason to run it.
 all candidates — a fixed split cannot trade a cheap summary against an expensive
 quote when the query needs the quote. Their substrate/projection separation is
 this design's two-system split under different names, and their hierarchical
-summarisation is the representation ladder. Reciprocal rank fusion is now **built and measured** (`Fusion::Rrf`, off by
+summarisation is the representation ladder.
+
+Reciprocal rank fusion is now **built and measured** (`Fusion::Rrf`, off by
 default, `bench --fusion`) rather than proposed. It buys nothing here, which the
 channel measurement predicted: RRF rewards agreement between channels and 195 of
 220 ranked positions on this corpus come from exactly one channel. See item 20 —
