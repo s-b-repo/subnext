@@ -203,6 +203,39 @@ A tool that silently passes on an empty directory is worth more scrutiny than
 the code it audits — it had been reporting success for a case where it had
 examined nothing.
 
+### The crate's first , and why it is not the one removed today
+
+ asserts that the live-by-key index agrees positionally with
+`by_key(key, true)`. It is section A's +1 at `cc5dc7f`, and it is a legitimate
+new hit rather than drift.
+
+It is also the exact inverse of the `debug_assert_eq!` this repository removed
+earlier today, and the distinction is worth keeping because the two share a
+macro name and nothing else:
+
+| | removed | added |
+|---|---|---|
+| guarded | Table 4's published correctness-equality claim | an internal index invariant |
+| ran in | nothing — every benchmark uses `--release` | the debug test runs that check it |
+| in release | compiled out, so the control could not fire | compiled out, and the maintenance it guards is identical there |
+
+The first was a control wired into a release-path claim it could never check.
+The second checks a debug-time invariant whose behaviour does not vary by
+profile. A future reader primed by the account above would reasonably read any
+`debug_assert` here as a regression, so the one-line reason sits directly above
+it in the source.
+
+The property is independently covered by `tests/live_index.rs`, which its
+author verified fails when either the supersede or the `insert_restored`
+maintenance is skipped — a control demonstrated to fire on both paths rather
+than assumed to.
+
+**Totals at `cc5dc7f`:** 296 distinct hit lines, 347 raw matches, 110 in gating
+sections, across 30 files and 14722 lines. Section P is 0 and the CI gate is
+green. Quote the delta rather than the absolute when handing these between
+sessions — four of us have been committing today, and +1 from a known commit
+survives a moving base in a way an absolute does not.
+
 ## Gating
 
 Section P is wired into CI as `.github/workflows/audit.yml`, which runs
