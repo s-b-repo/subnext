@@ -100,9 +100,26 @@ version already did. `RESULTS.md` now carries the three-line procedure rather
 than the conclusion.
 
 It is the failure this project is least able to see on its own, because in every
-case the artefact looks exactly like a working one. Describing the class confers
-no immunity to it: the fourth instance was committed by someone who had just
-finished writing up the third.
+case the artefact looks exactly like a working one.
+
+**Describing the class confers no immunity to it, four times over.** A control
+validated by confirming it passed, immediately after repairing one that could not
+fail. A claim asserted against a list read the same session. An unreproducible
+verification committed while fixing an unfireable assertion. Byte sequences
+matched instead of asking what a generator emits, while writing the note
+describing that exact substitution.
+
+So the taxonomy is a **diagnostic** instrument, not a prophylactic one. It
+identifies what went wrong once a second instrument has disagreed. It does not
+appear to prevent anything, and the guard is the instrument rather than the
+knowledge.
+
+The stronger form — that naming a failure mode is *worse* than leaving it
+unnamed, because it converts vigilance into confidence — is not claimed here. It
+needs a counterfactual nobody observed: how carefully the same people would have
+worked without the name. What the record supports is that naming bought nothing,
+four times. That the satisfying version is the one that would get quoted is the
+reason to stop at the defensible one.
 
 A fifth of the same shape was found in the editing tooling — a `str.replace`
 that did not assert its pattern matched, so a stale pattern produced a
