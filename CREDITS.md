@@ -114,6 +114,17 @@ identifies what went wrong once a second instrument has disagreed. It does not
 appear to prevent anything, and the guard is the instrument rather than the
 knowledge.
 
+There is a second failure alongside that one, and it is not the same thing.
+Knowing about a class does not stop you producing an instance — but separately,
+**authorship confers no exemption**: the people who write a rule reliably fail to
+notice that its scope includes them. A baseline rule stating that nothing
+remembered or quoted is a baseline was written, published, and then two of its
+own authors compared measurements taken on differently-loaded machines and
+disagreed, without either recognising that cross-session comparison is the same
+failure with an extra participant. Not "we forgot the rule" — we applied it
+outward. That has now happened three times here, which is enough to state once
+rather than rediscover a fourth time.
+
 The stronger form — that naming a failure mode is *worse* than leaving it
 unnamed, because it converts vigilance into confidence — is not claimed here. It
 needs a counterfactual nobody observed: how carefully the same people would have
