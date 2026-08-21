@@ -22,7 +22,7 @@ use std::collections::HashSet;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
-use crate::text::{contains_any, content_tokens};
+use crate::text::contains_any;
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5";
 
@@ -71,6 +71,12 @@ pub struct LocalReasoner {
     /// compact form probably dropped the detail the question turns on. That is
     /// precisely the "model signals insufficiency" case escalation exists for.
     pub escalate_below: f32,
+    /// Whether this reasoner can emit `#ESCALATE` at all.
+    ///
+    /// `false` models the documented poor fit — a harness with no way to signal
+    /// insufficiency. It is a property of the *harness*, so it is set here and
+    /// not on the runtime; `Dcr::auto_escalate` is the runtime's answer to it.
+    pub signal: bool,
     escalated: HashSet<String>,
     current_query: Option<String>,
 }
@@ -80,6 +86,7 @@ impl Default for LocalReasoner {
         Self {
             threshold: 0.25,
             escalate_below: 0.6,
+            signal: true,
             escalated: HashSet::new(),
             current_query: None,
         }
@@ -129,23 +136,10 @@ impl LocalReasoner {
         out
     }
 
+    /// Delegates to [`crate::policy::overlap`], which the runtime also uses to
+    /// reconstruct this reasoner's escalation decision without being told it.
     fn score(query: &str, line: &ContextLine) -> f32 {
-        let q: HashSet<String> = content_tokens(query).into_iter().collect();
-        if q.is_empty() {
-            return 0.0;
-        }
-        // `server.ip = 10.0.9.7` should match "server ip", so split dotted keys.
-        let expanded = format!("{} {}", line.body.replace('.', " "), line.body);
-        let tokens: HashSet<String> = content_tokens(&expanded).into_iter().collect();
-        let mut overlap = q.intersection(&tokens).count() as f32 / q.len() as f32;
-        // A question is about the *subject*, so key matches count double.
-        let head = line.body.split('=').next().unwrap_or("").replace('.', " ");
-        let head_tokens: HashSet<String> = content_tokens(&head).into_iter().collect();
-        let head_hits = q.intersection(&head_tokens).count();
-        if head_hits > 0 {
-            overlap += 0.5 * head_hits as f32 / q.len() as f32;
-        }
-        overlap
+        crate::policy::overlap(query, &line.body)
     }
 }
 
@@ -176,7 +170,8 @@ impl Reasoner for LocalReasoner {
         let Some((best_score, best)) = scored.first() else {
             return "I don't have that in the active context.".to_string();
         };
-        let escalatable = best.level != "L0" && !self.escalated.contains(&best.node);
+        let escalatable =
+            self.signal && best.level != "L0" && !self.escalated.contains(&best.node);
 
         if *best_score < self.threshold {
             // Nothing usable. If the best candidate is a compressed form with

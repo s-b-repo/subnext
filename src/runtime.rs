@@ -45,7 +45,21 @@ pub struct Answer {
     pub tokens: usize,  // audit-allow: LM token count, not a credential
     /// True when a mid-turn invalidation forced the workspace to be rebuilt.
     pub replanned: bool,
+    /// The reasoner asked for a richer level and the runtime could not serve
+    /// it — the escalation budget was spent, or the node id did not resolve.
+    ///
+    /// Reported rather than swallowed: the turn produced no answer, and a
+    /// caller that cannot tell that apart from "the history does not contain
+    /// it" is being handed the degraded path without being told.
+    pub escalation_refused: bool,
 }
+
+/// Returned when the reasoner requested a level the runtime would not serve.
+///
+/// Deliberately the same sentence the reasoner produces when nothing in the
+/// window is usable, because that is what the situation is from the caller's
+/// side: the model declined to answer from what it was given.
+pub const UNSERVED_ESCALATION: &str = "I don't have that in the active context.";
 
 pub struct Dcr {
     pub clock: Clock,
@@ -63,6 +77,17 @@ pub struct Dcr {
     /// How many times a turn may be re-planned at a richer level after the
     /// model reports insufficiency. Zero disables the escalation protocol.
     pub max_escalations: u32,
+    /// Compute the escalation decision in the runtime when the reasoner did not
+    /// send one.
+    ///
+    /// The poor fit this addresses is "reasoners that cannot signal": with
+    /// escalation disabled the ablation drops to 6/7, losing the buried-detail
+    /// probe. The model-side trigger is a function of the query and the
+    /// rendered window only, so [`DecisionPolicy::needs_escalation`] can
+    /// evaluate the same thing here. Off by default: it costs an extra plan on
+    /// turns that would not have escalated, and a harness that *can* signal
+    /// should be believed rather than second-guessed.
+    pub auto_escalate: bool,
     /// Every source span that has appeared in an assembled context, ever.
     ///
     /// The dual of `audit_path_completeness`: that metric is a property of
@@ -111,6 +136,7 @@ impl Dcr {
             telemetry: Telemetry::default(),
             budget,
             max_escalations: 2,
+            auto_escalate: false,
             planning: crate::planner::StageProfile::default(),
             plans: 0,
             assembled_spans: std::collections::HashSet::new(),
@@ -247,6 +273,11 @@ impl Dcr {
         let mut force: HashMap<NodeIdx, Level> = HashMap::new();
         let mut pin: Vec<NodeIdx> = Vec::new();
         let mut escalations = 0u32;
+        // Nodes already escalated this turn. Without this an inferred
+        // escalation can re-request the node it just promoted, since the
+        // promoted line still scores highest.
+        let mut auto_escalated: HashSet<NodeIdx> = HashSet::new();
+        let mut escalation_refused = false;
         let mut replanned = false;
         let mut consistency_retries = 0u32;
 
@@ -265,17 +296,42 @@ impl Dcr {
                 replanned = true;
                 continue;
             }
-            if let Some(node_id) = parse_escalation(&text) {
-                if escalations < self.max_escalations {
-                    if let Some(idx) = self.graph.idx_of(&node_id) {
-                        escalations += 1;
-                        force.insert(idx, Level::L0);
-                        if !pin.contains(&idx) {
-                            pin.push(idx);
-                        }
-                        continue;
-                    }
+            // A signalled escalation names a node id; an inferred one names an
+            // index directly. Both land in the same force/pin/re-plan step, so
+            // the mechanism being exercised is identical either way and the
+            // ablation rows are comparable.
+            let requested: Option<NodeIdx> = match parse_escalation(&text) {
+                Some(node_id) => self.graph.idx_of(&node_id),
+                None if self.auto_escalate => {
+                    self.policy.needs_escalation(query, &context, &auto_escalated)
                 }
+                None => None,
+            };
+            if let Some(idx) = requested {
+                if escalations < self.max_escalations {
+                    escalations += 1;
+                    auto_escalated.insert(idx);
+                    force.insert(idx, Level::L0);
+                    if !pin.contains(&idx) {
+                        pin.push(idx);
+                    }
+                    continue;
+                }
+            }
+            // An escalation the runtime cannot serve must not be returned as
+            // the answer.
+            //
+            // It used to be. With `max_escalations = 0` the reasoner still
+            // emitted `#ESCALATE <node>`, nothing consumed it, and the control
+            // token fell through to the caller as the turn's output. That made
+            // the `no escalation` ablation row fail for a reason unrelated to
+            // the mechanism it was ablating: the probe was scored against the
+            // literal string `#ESCALATE clai_...`, so the row could not have
+            // passed however reachable the answer was. A control that cannot
+            // pass is as uninformative as one that cannot fail.
+            if parse_escalation(&text).is_some() {
+                escalation_refused = true;
+                break (UNSERVED_ESCALATION.to_string(), context);
             }
             break (text, context);
         };
@@ -324,6 +380,7 @@ impl Dcr {
             escalations,
             cited,
             replanned,
+            escalation_refused,
         }
     }
 
@@ -1369,6 +1426,10 @@ fn node_from_json(data: &Json) -> Node {
             l1: data.get("l1").and_then(Json::as_str).map(str::to_string),
             l2: None,
             l3: data.get("l3").and_then(Json::as_f64),
+            // Not persisted: it is a memo of a derivable quantity, and a stored
+            // one would have to be trusted against a span list that reloads
+            // separately.
+            l0_sizes: None,
         }),
         meta,
         reads: Cell::new(data.get("reads").and_then(Json::as_u64).unwrap_or(0) as u32),

@@ -8,9 +8,12 @@
 //! node that keeps being read at L0 without yielding anything new collapses
 //! into a cached fact.
 
+use std::collections::HashSet;
+
 use crate::ladder::Level;
-use crate::nodes::{Kind, Node, Status};
-use crate::text::contains_any;
+use crate::nodes::{Kind, Node, NodeIdx, Status};
+use crate::planner::ActiveContext;
+use crate::text::{contains_any, content_tokens};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryType {
@@ -133,6 +136,36 @@ const VALUE_MARKERS: &[&str] = &[
     "how many",
 ];
 
+/// Lexical overlap between a question and one rendered context line.
+///
+/// Shared deliberately. [`LocalReasoner`](crate::llm::LocalReasoner) scores
+/// context lines with this to decide whether to emit `#ESCALATE`, and
+/// [`DecisionPolicy::needs_escalation`] scores the *assembled window* with the
+/// same function to reach the same decision without being told. That is the
+/// whole basis for serving a harness that cannot signal: the escalation
+/// judgement never depended on anything private to the model, only on the
+/// query and the bytes the model was handed. If these two ever diverge, the
+/// runtime-side check is no longer a stand-in for the model-side one, so there
+/// is one function rather than two that agree today.
+pub fn overlap(query: &str, body: &str) -> f32 {
+    let q: HashSet<String> = content_tokens(query).into_iter().collect();
+    if q.is_empty() {
+        return 0.0;
+    }
+    // `server.ip = 10.0.9.7` should match "server ip", so split dotted keys.
+    let expanded = format!("{} {}", body.replace('.', " "), body);
+    let tokens: HashSet<String> = content_tokens(&expanded).into_iter().collect();
+    let mut score = q.intersection(&tokens).count() as f32 / q.len() as f32;
+    // A question is about the *subject*, so key matches count double.
+    let head = body.split('=').next().unwrap_or("").replace('.', " ");
+    let head_tokens: HashSet<String> = content_tokens(&head).into_iter().collect();
+    let head_hits = q.intersection(&head_tokens).count();
+    if head_hits > 0 {
+        score += 0.5 * head_hits as f32 / q.len() as f32;
+    }
+    score
+}
+
 /// Kinds that are cheap, near-always relevant, and pinned into every turn.
 pub const ALWAYS_ADMIT: [Kind; 2] = [Kind::Goal, Kind::Constraint];
 
@@ -149,12 +182,23 @@ pub struct Decision {
 #[derive(Debug, Clone)]
 pub struct DecisionPolicy {
     pub deescalate_after: u32,
+    /// Below this a match is unusable. Mirrors `LocalReasoner::threshold`.
+    pub answer_floor: f32,
+    /// Between `answer_floor` and this, the best match is plausible but thin.
+    /// Mirrors `LocalReasoner::escalate_below`.
+    pub escalate_below: f32,
+    /// Below `answer_floor` but at or above this, there is enough overlap that
+    /// the raw span is worth a look rather than answering "I don't have that".
+    pub escalate_from: f32,
 }
 
 impl Default for DecisionPolicy {
     fn default() -> Self {
         Self {
             deescalate_after: 3,
+            answer_floor: 0.25,
+            escalate_below: 0.6,
+            escalate_from: 0.1,
         }
     }
 }
@@ -283,6 +327,49 @@ impl DecisionPolicy {
                 Level::L2 => "compact state object is sufficient",
                 Level::L3 => "answer is a function of known inputs",
             },
+        }
+    }
+
+    /// The node this window is too compressed to answer from, if any —
+    /// computed by the runtime instead of waiting for the model to say so.
+    ///
+    /// The documented poor fit was "reasoners that cannot signal": a harness
+    /// with no way to emit `#ESCALATE` loses the mechanism that carries the
+    /// exact-quote and buried-detail probes. But the model-side trigger is a
+    /// function of the query and the rendered window and nothing else, so the
+    /// runtime can evaluate it directly. See [`overlap`].
+    ///
+    /// This is a *proxy*, and the distinction matters for what may be claimed
+    /// from it: a real model's sense of insufficiency is not this function.
+    /// What it establishes is that the signal is reconstructible from what the
+    /// runtime already holds, not that escalation no longer needs a model.
+    pub fn needs_escalation(
+        &self,
+        query: &str,
+        context: &ActiveContext,
+        already: &HashSet<NodeIdx>,
+    ) -> Option<NodeIdx> {
+        let mut best: Option<(f32, &crate::planner::Admission)> = None;
+        for entry in &context.entries {
+            let score = overlap(query, &entry.rendered);
+            if best.is_none_or(|(top, _)| score > top) {
+                best = Some((score, entry));
+            }
+        }
+        let (score, entry) = best?;
+        if entry.level == Level::L0 || already.contains(&entry.node) {
+            return None;
+        }
+        let wants_quote = self.classify(query) == QueryType::QuoteExact;
+        // Below the floor with *some* overlap the detail may be in the raw
+        // span; between the floor and `escalate_below` the compact form is
+        // plausible but thin, which is the case escalation exists for.
+        let thin = score < self.escalate_below && score >= self.answer_floor;
+        let unusable = score < self.answer_floor && score >= self.escalate_from;
+        if wants_quote || thin || unusable {
+            Some(entry.node)
+        } else {
+            None
         }
     }
 
