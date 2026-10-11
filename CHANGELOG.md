@@ -12,6 +12,115 @@ yet; everything below is on `main` at `0.1.0`.
 
 ## [Unreleased]
 
+### 2026-10-12 — Fixed: review pass over the cache/skills/sessions release
+
+**Prefix-reuse metric could panic on multibyte prompts.** The shared-prefix
+measurement (runtime telemetry and `bench --cache`) sliced the prompt at the
+shared *byte* prefix of two turns — and 'é' (C3 A9) vs 'è' (C3 A8) share a
+lead byte, so the slice could land inside a codepoint: the same crash class
+the indexer fix below removed, reintroduced in two new places. Both now floor
+to the nearest char boundary. Regression test included.
+
+**Skill loader failures were invisible.** A failed `SkillLoader::activate`
+left the skill out of `Answer::skills` with no record anywhere — while the
+prompt, already sent, listed it under `SKILLS (activated)`. Failures now
+count in telemetry as `skill_load_failures`, so the lie surfaces.
+
+**The fit gate certified the history, not the prompt.** It compared
+`history_tokens <= budget`, but the bypass prompt adds a header, the QUESTION
+wrapper and the query itself — a store that "fit" could still overflow the
+window. The gate now adds the query estimate plus a fixed wrapper margin
+before deciding. `dcr ask --fit-gate` without `--endpoint` also prints a
+warning: the bypass sends raw text the offline line-matcher cannot read.
+
+**Bypass turns broke cross-turn state.** `ask_bypass` updated neither
+`last_prompt` nor `last_assembly`, so prefix reuse compared across bypasses
+and stickiness could pay toward a pre-bypass window after the store outgrew
+the gate. A bypassed turn now records its prompt and clears the planned
+membership.
+
+**Session eviction could split a live conversation.** `SessionRouter` evicted
+the LRU entry even when another thread held it mid-request: the next request
+for that id spawned a second, cold runtime and the in-flight state was
+orphaned. Eviction now skips sessions in flight (capacity is exceeded, and
+only the counter reports), and `serve` connections got the missing resource
+limits: a 16 MiB ingest-body cap and a 5-minute idle read timeout.
+
+**`HttpReasoner` assumed one wire shape.** It now checks the HTTP status line
+(a 500 is a named failure, not a JSON parse error over an error page) and
+decodes `Transfer-Encoding: chunked`, which local servers may return even
+with `Connection: close`. Both behaviours have mock-server tests.
+
+**`bench --cache` percentages shared one denominator.** The stable and sticky
+columns divided by the *ranked* plan's token count, though both render
+different bytes and sticky plans its own membership. Each column is now
+priced against its own layout's tokens.
+
+### 2026-10-10 — Added: cache-awareness, skills, sessions, HTTP reasoner, fit gate
+
+**Prefix-stable layout.** `ActiveContext::render_prefix_stable()` renders the
+same plan for prompt-cache reuse: a turn-invariant header, per-turn stats moved
+to a trailer, and entries ordered by content address (`node_id`) within each
+kind group rather than by per-turn utility. Off by default — enable with
+`Dcr::prefix_stable` / `--prefix-stable`. `bench --cache` measures both layouts
+on identical plans: 2.8% → 23.5% cacheable prefix at 300 turns.
+
+**Stickiness (hysteresis).** `Weights::stickiness` pays a utility bonus to
+nodes admitted in the previous window — the minimal-edit objective
+`U(S) − λ·edit(S, S_prev)` with λ paid as a named, auditable term. The runtime
+tracks `last_assembly` as its source of truth and records a per-turn
+`prefix_reuse` metric from the prompts actually sent. Measured honestly: at
+any weight (0.5, 2.0) the bonus changes nothing on the standard probes — their
+churn is topic change, not oscillation, and a retention bonus cannot hold a
+window across a change of subject. Correctness with the weight on is asserted
+by test, and the metric exists for workloads that do oscillate. CLI:
+`--stickiness W`.
+
+**Skill nodes.** A new `Kind::Skill` names a *capability* instead of a fact:
+`key` is the skill name, `value` the description similarity matches against,
+and `meta.source` a content-addressed adapter reference. The planner admits
+skills through the same knapsack as facts, under a `## SKILLS (activated)`
+group; admission in a turn's final plan fires the new `SkillLoader` hook once
+per turn. The default `RecordingLoader` is inert; a serving stack (multi-LoRA,
+peregrine) plugs in behind the same trait. Register with `Dcr::add_skill` or
+`dcr skill add`; activated skills are reported in `Answer::skills`. Two edge
+cases fell out of a kind with only one ladder level, both fixed: an `#ESCALATE`
+on a skill no longer evicts it (a forced level the node cannot render falls
+back to its own levels), and `needs_escalation` no longer targets skills. The
+grounding rule binds skills against their artifact: no adapter reference, no
+node. `meta.source` is now persisted — older stores simply have none.
+
+**`HttpReasoner`.** An OpenAI-compatible reasoner over `std::net::TcpStream`
+(`POST /v1/chat/completions`, non-streaming, localhost, no TLS) — the
+dependency-free bridge to peregrine-serve or vLLM. CLI: `--endpoint HOST:PORT
+--model NAME`. Wire format and failure reporting are covered by a mock-server
+test; running the probe suite against a real checkpoint remains the validation
+step no mock can do.
+
+**Sessions and `dcr serve`.** `SessionRouter` shards one runtime per
+conversation behind `Arc<Mutex<Dcr>>` with LRU eviction (reported, never
+silent) — concurrency across conversations, no interior locking. `dcr serve
+[--port N] [--sessions N]` exposes ASK/INGEST over a line-based TCP protocol.
+The `Reasoner`, `SkillLoader`, `Embedder`, estimator and derivation traits
+gained `Send` bounds to make this possible.
+
+**Fit gate.** `dcr ask --fit-gate`: when the whole store fits in `B_attention`,
+send the raw history and skip indexing and the knapsack — planning is rent on
+history, and below a window's worth of history it buys nothing. Never fires
+with skills registered (admission loads them), and is off by default because
+the bypass sends raw text `LocalReasoner` cannot read. `Answer::bypassed` and
+telemetry's `bypass_rate` report it.
+
+### 2026-10-10 — Fixed: byte-wise word scans panicked on multibyte text
+
+The indexer's separator and clause scanners walked bytes but widened each byte
+to a char for word/whitespace checks; a lead byte like 0xE2 widens to 'â'
+(alphanumeric), so the scan ran into the middle of a multibyte character and
+sliced a non-boundary. Any document with box-drawing, em-dashes or accented
+text — including this repo's own README — panicked on ingest. All scans now
+treat non-ASCII bytes as non-word, which is conservative (a missed separator,
+never a crash) and boundary-safe by construction. Regression test included.
+
 ### 2026-08-21 — Fixed: expansion re-admitted evidence seeding had excluded
 
 `seed` excludes evidence whose every live dependent has been superseded; `expand`
