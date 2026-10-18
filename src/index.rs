@@ -14,6 +14,8 @@ use std::collections::{HashMap, HashSet};
 use crate::embed::{DIM, cosine, hashing_embed};
 use crate::text::content_tokens;
 
+type ChannelResults = (Vec<(usize, f32)>, Vec<(usize, f32)>);
+
 /// Ties break on the item's own index, never on hash order — the plan a query
 /// produces must not depend on which way a `HashMap` happened to iterate.
 fn rank(mut scored: Vec<(usize, f32)>, k: usize) -> Vec<(usize, f32)> {
@@ -137,9 +139,28 @@ struct Lsh {
     tables: Vec<HashMap<u32, Vec<usize>>>,
 }
 
-const LSH_TABLES: usize = 8;
-const LSH_BITS: usize = 12;
+const LSH_TABLES: usize = 16;
+const LSH_BITS: usize = 8;
 const LSH_SEED: u64 = 0x5DEE_CE66_D1CE_F00D;
+
+// Geometry note, measured on this corpus at 2,661 nodes before and after the
+// retune (examples/lsh_parameter_sweep.rs for the sweep, bench --recall and
+// bench --scaling for the shipped config, evaluated against the exact top-12):
+//
+//   12 bits, r=1, 8 tables (the old config): peak recall 14.3% without the
+//     fallback (the sweep's pure-LSH number); at small N the recorded 100% was
+//     the small-candidate then exact-scan fallback firing, not the LSH path.
+//   8 bits, r=1, 16 tables (this config)   : recall 94-95% at every size,
+//     candidates ~55-60% of N; the fallback almost never fires.
+//
+// The underlying issue is a parameterisation error, not a tuning miss: twelve
+// plane signs are informative only for near-duplicates, and this embedder
+// separates relevant neighbours at cosine 0.2-0.45, where per-bit agreement
+// carries no signal at all. Short tables recover the neighbours. Recall and
+// pruning trade along a frontier measured in the sweep; nothing here reaches
+// high recall with a sharply pruned candidate set on an embedding that separates
+// neighbours at cosine ~0.35, so the honest fix is the point on the frontier
+// that no longer hides behind the fallback.
 
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -457,7 +478,7 @@ impl HybridIndex {
         query: &str,
         query_vec: &[f32],
         k: usize,
-    ) -> (Vec<(usize, f32)>, Vec<(usize, f32)>) {
+    ) -> ChannelResults {
         let (lexical, vector) = match namespace {
             Namespace::Node => (&self.node_lexical, &self.node_vector),
             Namespace::Span => (&self.span_lexical, &self.span_vector),

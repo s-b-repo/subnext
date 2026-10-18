@@ -852,8 +852,9 @@ pub fn run_scaling(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
         let report = runtime.telemetry.report();
 
         // Same corpus, approximate retrieval. Reported beside the exact path
-        // rather than replacing it: LSH buys latency and costs a little
-        // attention, and the trade is the reader's to judge.
+        // rather than replacing it: LSH buys a bounded candidate set and costs
+        // recall; the trade is measured in bench --recall and the reader's to
+        // judge.
         let mut ann = Dcr::new(budget);
         ann.index.set_exact(false);
         for (doc_id, text) in &corpus.docs {
@@ -909,13 +910,13 @@ pub fn run_scaling(sizes: &[usize], budget: usize) -> Result<(), DcrError> {
         );
     }
     println!(
-        "query latency is still not flat. 'query' scores every vector; 'ann query' prunes with\n\
-         random-hyperplane LSH, which is roughly an order of magnitude faster at the largest size\n\
-         with identical correctness, at the cost of a slightly larger working set — approximate\n\
-         seeding admits a slightly different candidate set. Profiling the remainder shows the\n\
-         retrieval step is no longer what grows: with ~96% of vectors pruned the index call is\n\
-         a small fraction of a query and the cost has moved into planning, so 'the vector search\n\
-         is a linear scan' is no longer the reason latency scales."
+        "query latency is still not flat. 'query' scores every vector; 'ann query' generates a\n\
+         bounded candidate set with random-hyperplane LSH. With the retuned geometry the ann path\n\
+         is no longer faster end to end at any size measured: it scores roughly half the vectors\n\
+         the exact path does, and the remainder of the cost sits in planning, so the index call\n\
+         is a small fraction of a query either way. The path is kept for its bounded candidate\n\
+         set — recall 94-95% against the exact top-12 at every size (bench --recall) — not for\n\
+         latency, and 'the vector search is a linear scan' is no longer the reason latency scales."
     );
     Ok(())
 }
@@ -1240,7 +1241,7 @@ fn run_mutation_set(
                 runtime
                     .graph
                     .nodes()
-                    .get(usize::from(*idx))
+                    .get(*idx)
                     .is_some_and(|n| n.value.to_lowercase().contains(&stale_v))
             });
             if rejected_by_guard {
@@ -2727,6 +2728,103 @@ pub fn build_corpus_permuted(turns: usize) -> Corpus {
     }
 }
 
+/// Reactivation-aware pruning A/B — does the predictor earn its keep over
+/// plain recency?
+///
+/// The "when fancy eviction fails" literature predicts it will not: plain
+/// recency is unusually predictive in agentic settings. The claim the
+/// predictor has to beat: at the same cutoff, sparing old-but-hot candidates
+/// (read often, scored well) recovers correctness that pure recency breaks,
+/// without giving back the latency. Both probes sets run — the standard one,
+/// and the adversarial mutation set whose superseded value is the closer
+/// lexical match, because a pruner that changes *which* candidates survive
+/// can also change which lies get served.
+pub fn run_reactivation(turns: usize, budget: usize) -> Result<(), DcrError> {
+    println!("REACTIVATION PRUNING A/B - {turns} turns, B_attention = {budget}");
+    println!(
+        "cutoff = fraction of the store's age span; reactivation spares candidates the age \
+         floor would drop when their predicted reactivation probability clears 0.5"
+    );
+    let header = format!(
+        "{:<22} {:>8} {:>9} {:>9} {:>8} {:>8} {:>10}",
+        "mode", "correct", "mean k", "q ms", "dropped", "spared", "adv corrected"
+    );
+    println!("{}", "-".repeat(header.len()));
+    println!("{header}");
+    println!("{}", "-".repeat(header.len()));
+
+    for &(cutoff, reactivation) in &[
+        (0.0f32, false),
+        (0.4, false),
+        (0.4, true),
+        (0.6, false),
+        (0.6, true),
+        (0.8, true),
+    ] {
+        let mut runtime = Dcr::new(budget);
+        runtime.planner.recency_cutoff = cutoff;
+        runtime.planner.reactivation_prune = reactivation;
+        let corpus = build_corpus(turns);
+        for (doc_id, text) in &corpus.docs {
+            runtime.ingest(text, Some(doc_id))?;
+        }
+        let mut reasoner = LocalReasoner::new();
+        let started = Instant::now();
+        let mut correct = 0usize;
+        for probe in &corpus.probes {
+            let answer = runtime.ask_with(probe.query, None, &mut reasoner);
+            let scored = if probe.on_context {
+                answer.context.render()
+            } else {
+                answer.text.clone()
+            };
+            if probe.scores(&scored) {
+                correct += 1;
+            }
+        }
+        let q_ms = started.elapsed().as_secs_f64() * 1000.0 / corpus.probes.len() as f64;
+        let profile = runtime.planning;
+        let (mut adv_correct, mut adv_total) = (0usize, 0usize);
+        let mut_corpus = build_mutation_corpus_from(turns, ADVERSARIAL);
+        let mut mut_runtime = Dcr::new(budget);
+        mut_runtime.planner.recency_cutoff = cutoff;
+        mut_runtime.planner.reactivation_prune = reactivation;
+        for (doc_id, text) in &mut_corpus.docs {
+            mut_runtime.ingest(text, Some(doc_id))?;
+        }
+        let mut mut_reasoner = LocalReasoner::new();
+        for m in ADVERSARIAL {
+            let text = mut_runtime.ask_with(m.query, None, &mut mut_reasoner).text;
+            if text.to_lowercase().contains(&m.live.to_lowercase()) {
+                adv_correct += 1;
+            }
+            adv_total += 1;
+        }
+        let mode = format!(
+            "cutoff {cutoff:.1}{}",
+            if reactivation { " +reactivation" } else { "" }
+        );
+        println!(
+            "{mode:<22} {:>5}/{} {:>9.1} {:>9.2} {:>8} {:>8} {:>6}/{}",
+            correct,
+            corpus.probes.len(),
+            profile.seeds_kept as f64 / runtime.plans.max(1) as f64,
+            q_ms,
+            profile.seed_dropped_recency,
+            profile.seed_spared_reactivation,
+            adv_correct,
+            adv_total,
+        );
+    }
+    println!("{}", "-".repeat(header.len()));
+    println!(
+        "The predictor earns its keep only where its row beats plain recency at the same \
+         cutoff on BOTH probe sets without giving back the latency. A row that merely \
+         keeps more candidates is a weaker pruner, not a smarter one."
+    );
+    Ok(())
+}
+
 /// Does the runtime identify a subject, or the document that mentions it?
 pub fn run_subject_control(turns: usize, budget: usize) -> Result<(), DcrError> {
     println!("SUBJECT IDENTIFICATION CONTROL - B_attention = {budget}");
@@ -2815,22 +2913,38 @@ pub fn run_cache_layout(turns: usize, budget: usize) -> Result<(), DcrError> {
         "Shared prefix between consecutive turns, in the order the context is actually rendered."
     );
     let header = format!(
-        "{:<38} {:>9} {:>14} {:>10}",
-        "probe", "tokens", "shared prefix", "cacheable"
+        "{:<38} {:>9} {:>14} {:>10} {:>8} {:>9} {:>6}",
+        "probe", "tokens", "shared prefix", "cacheable", "nodes", "survivors", "moved"
     );
     println!("{}", "-".repeat(header.len()));
     println!("{header}");
     println!("{}", "-".repeat(header.len()));
 
-    let mut previous: Option<String> = None;
+    let mut previous: Option<(String, Vec<(String, usize)>)> = None;
     let (mut total_tokens, mut total_shared) = (0usize, 0usize);
+    let (mut total_survivors, mut total_moved) = (0usize, 0usize);
     for probe in &corpus.probes {
         let answer = runtime.ask_with(probe.query, None, &mut reasoner);
         let rendered = answer.context.render();
+        // Where each admitted block starts, in the order the context is *rendered*.
+        // Blocks are marked by their node id at the head of their line, so the
+        // offset a node sits at between two turns is the honest "did the ordering
+        // move" signal — recomputed from the very string a prompt cache would see.
+        let mut positions: Vec<(String, usize)> = answer
+            .context
+            .entries
+            .iter()
+            .filter_map(|e| {
+                rendered
+                    .find(&format!("[{} ", e.node_id))
+                    .map(|p| (e.node_id.clone(), p))
+            })
+            .collect();
+        positions.sort();
         let tokens = estimate_tokens(&rendered);
         let shared_chars = previous
             .as_ref()
-            .map(|prev| {
+            .map(|(prev, _)| {
                 prev.as_bytes()
                     .iter()
                     .zip(rendered.as_bytes())
@@ -2840,25 +2954,127 @@ pub fn run_cache_layout(turns: usize, budget: usize) -> Result<(), DcrError> {
             .unwrap_or(0);
         // Price the shared run in tokens, so the number is comparable to k.
         let shared_tokens = estimate_tokens(&rendered[..shared_chars.min(rendered.len())]);
+        let prev = previous.as_ref().map(|(_, p)| p);
+        let survivors = prev.map_or(0, |p| {
+            positions
+                .iter()
+                .filter(|(id, _)| p.iter().any(|(pid, _)| *pid == *id))
+                .count()
+        });
+        let moved = prev.map_or(0, |p| {
+            positions
+                .iter()
+                .filter(|(id, pos)| {
+                    p.iter()
+                        .any(|(pid, ppos)| pid == id && ppos != pos)
+                })
+                .count()
+        });
+        total_survivors += survivors;
+        total_moved += moved;
         total_tokens += tokens;
         total_shared += shared_tokens;
         println!(
-            "{:<38} {tokens:>9} {shared_tokens:>14} {:>9.1}%",
+            "{:<38} {tokens:>9} {shared_tokens:>14} {:>9.1}% {nodes:>8} {survivors:>9} {moved:>6}",
             probe.label,
-            shared_tokens as f64 / tokens.max(1) as f64 * 100.0
+            shared_tokens as f64 / tokens.max(1) as f64 * 100.0,
+            nodes = positions.len(),
         );
-        previous = Some(rendered);
+        previous = Some((rendered, positions));
     }
     println!("{}", "-".repeat(header.len()));
     println!(
         "overall cacheable prefix: {:.1}% of assembled tokens ({total_shared} of {total_tokens})",
         total_shared as f64 / total_tokens.max(1) as f64 * 100.0
     );
+    if total_survivors > 0 {
+        println!(
+            "ordering churn: {} of {} surviving blocks moved between consecutive turns ({:.1}%)",
+            total_moved,
+            total_survivors,
+            total_moved as f64 / total_survivors.max(1) as f64 * 100.0
+        );
+    }
     println!(
         "A low number is not a bug — it is the cost of re-planning. It does mean the token\n\
          counts elsewhere in this report are *assembled* tokens rather than *billable* ones,\n\
          and that a cache-friendly assembler sending more tokens could still be cheaper per\n\
          turn. Nothing here has measured that comparison."
+    );
+    Ok(())
+}
+
+/// Before/after comparison of the render ordering change — the instrument that
+/// produced the table in TODO.md item 17. Runs the same probes twice over one
+/// assembled context: once with the legacy per-turn utility sort + leading
+/// header, once with the stable node-id order + trailing header.
+pub fn run_cache_instrument(turns: usize, budget: usize) -> Result<(), DcrError> {
+    let corpus = build_corpus(turns);
+    let mut runtime = Dcr::new(budget);
+    for (doc_id, text) in &corpus.docs {
+        runtime.ingest(text, Some(doc_id.as_str()))?;
+    }
+    let mut reasoner = LocalReasoner::new();
+
+    println!("PROMPT-CACHE LAYOUT (INSTRUMENT) - {turns} turns, B_attention = {budget}");
+    println!("Shared prefix between consecutive turns, before vs after the render-order fix.");
+    let header = format!(
+        "{:<38} {:>14} {:>14}",
+        "probe", "shared before", "shared after"
+    );
+    println!("{}", "-".repeat(header.len()));
+    println!("{header}");
+    println!("{}", "-".repeat(header.len()));
+
+    let mut prev_legacy: Option<String> = None;
+    let mut prev_stable: Option<String> = None;
+    let (mut tot_before, mut tot_after, mut tot_tokens) = (0usize, 0usize, 0usize);
+
+    for probe in &corpus.probes {
+        let answer = runtime.ask_with(probe.query, None, &mut reasoner);
+        let stable = answer.context.render();
+        let legacy = answer.context.render_legacy();
+        let tokens = estimate_tokens(&stable);
+
+        let shared_before = prev_legacy.as_ref().map_or(0, |p| {
+            p.as_bytes()
+                .iter()
+                .zip(legacy.as_bytes())
+                .take_while(|(a, b)| a == b)
+                .count()
+        });
+        let shared_before_tokens = estimate_tokens(&legacy[..shared_before.min(legacy.len())]);
+
+        let shared_after = prev_stable.as_ref().map_or(0, |p| {
+            p.as_bytes()
+                .iter()
+                .zip(stable.as_bytes())
+                .take_while(|(a, b)| a == b)
+                .count()
+        });
+        let shared_after_tokens = estimate_tokens(&stable[..shared_after.min(stable.len())]);
+
+        tot_before += shared_before_tokens;
+        tot_after += shared_after_tokens;
+        tot_tokens += tokens;
+
+        println!(
+            "{:<38} {:>6} ({:>5.1}%)  {:>6} ({:>5.1}%)",
+            probe.label,
+            shared_before_tokens,
+            shared_before_tokens as f64 / tokens.max(1) as f64 * 100.0,
+            shared_after_tokens,
+            shared_after_tokens as f64 / tokens.max(1) as f64 * 100.0,
+        );
+
+        prev_legacy = Some(legacy);
+        prev_stable = Some(stable);
+    }
+    println!("{}", "-".repeat(header.len()));
+    println!(
+        "overall: before {:.1}%  after {:.1}%",
+        tot_before as f64 / tot_tokens.max(1) as f64 * 100.0,
+        tot_after as f64 / tot_tokens.max(1) as f64 * 100.0,
     );
     Ok(())
 }

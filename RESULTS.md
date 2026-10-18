@@ -19,6 +19,13 @@ without a revision attached is a table nobody can reproduce. Re-run the commands
 above after any change to `src/` and update this file with what they print —
 including when the numbers get worse.
 
+Sections marked *current* below were re-measured in this working tree (base
+`848ac42` plus two `src/` changes: the context render keeps stable block order
+across turns — `bench --cache`, recorded in the TODO — and the LSH retune).
+Both are changes to printed-table territory, so their tables are updated
+in place with the new measurements rather than left asserting the pinned
+state. Everything else is still the `8b7162f` run.
+
 ---
 
 ## Context rot
@@ -155,16 +162,24 @@ applied to every column equally.
 
 ## k stays flat while history grows
 
-Same probes, same `B_attention = 800`, history scaled 33x:
+Same probes, same `B_attention = 800`, history scaled 33x. *Current* — re-measured
+after the LSH retune; the ann columns are the moved ones:
 
 | turns | history | nodes | mean k | max k | correct | ingest | query | ann query | ann k |
 |---:|---:|---:|---:|---:|:---:|---:|---:|---:|---:|
 | 100 | 8,482 | 124 | 240.6 | 764 | 7/7 | 0.02s | 0.2ms | 0.2ms | 240.6 |
-| 300 | 27,362 | 298 | 145.1 | 249 | 7/7 | 0.05s | 0.2ms | 0.7ms | 267.1 |
-| 1,000 | 93,442 | 911 | 145.1 | 249 | 7/7 | 0.23s | 0.3ms | 1.7ms | 287.3 |
-| 3,000 | 283,253 | 2,661 | 145.1 | 249 | 7/7 | 1.10s | 1.0ms | 3.2ms | 278.3 |
+| 300 | 27,362 | 298 | 145.1 | 249 | 7/7 | 0.06s | 0.2ms | 0.2ms | 145.1 |
+| 1,000 | 93,442 | 911 | 145.1 | 249 | 7/7 | 0.25s | 0.4ms | 0.4ms | 145.1 |
+| 3,000 | 283,253 | 2,661 | 145.1 | 249 | 7/7 | 1.09s | 0.9ms | 1.0ms | 145.1 |
 
-The 100-turn row is higher than every row below it, which is not noise: the seed
+Same-probe rows as the previous revision, with two columns moved and the
+attention rows untouched: the ann columns previously carried both higher
+wall-clock cost and a larger working set (ann query 0.7/1.7/3.2ms, ann k
+267/287/278 at 300/1,000/3,000 turns). After the LSH retune (the geometry note in
+`src/index.rs` for the geometry and the sweep that drove it) the two paths pull
+the same working set — ann k equals mean k at every size — and end-to-end ann
+time matches the exact path within noise without the scaling gap. The 100-turn
+row is higher than every row below it, which is not noise: the seed
 floor is a fraction of the *top* hit, and on a small store the top hit is weaker,
 so the floor sits lower and admits more. The working set falls as the store grows
 and then holds exactly flat — 145.1 at 300, at 1,000 and at 3,000 turns.
@@ -464,27 +479,41 @@ evident, not impossible. See
 
 ## Known gap: end-to-end latency still grows, for a different reason
 
-**Query latency is not flat: 0.6ms → 12.6ms across the scaling run**, and the
-previous explanation for that was wrong. This file used to attribute it to the
-vector index being a linear scan. An LSH index now prunes roughly 96% of the
-vectors a query scores and takes the index call to a fraction of a millisecond
-— and end-to-end latency still grows, only more slowly (12.6ms → 5.8ms at 3,000
-turns). The cost has moved into planning, which has not been shown to be
-sub-linear either.
+*Current* — re-measured after the LSH retune.
+
+**Query latency is not flat across the scaling run**, and the previous
+explanation for that was wrong. This file used to attribute it to the vector
+index being a linear scan. An LSH index was introduced with a heavily-signed
+geometry (12 bits per table) whose candidate generation matched only
+near-duplicates — "prunes 96% of scored vectors" — and recall against the exact
+top-12 was carried by the exact-scan fallback: 100% at 300 turns, 54.8% at
+3,000, and the sweep in `examples/lsh_parameter_sweep.rs` priced the pure-LSH
+recall at that config at 14.3%. The geometry is retuned (8 bits × 16 tables; see
+`src/index.rs`): recall is 94-95% at every size with the fallback doing almost
+no work, and the candidate set is honestly bounded at ~55-60% of N.
+
+The current scaling run prices both paths end to end: 0.9ms exact vs 1.0ms
+approximate per query at 3,000 turns. Faster-than-exact was an artefact of the
+old geometry matching only near-duplicates; the honest geometry and the exact
+path cost the same at these sizes, and the index call is a small fraction of a
+query either way. The cost has moved into planning, which has not been shown to
+be sub-linear either.
 
 So the `O(k + r)` claim stands for **attention** and remains unestablished
 **end to end**. The retraction is worth stating plainly because the earlier
 diagnosis was confidently wrong in exactly the way a benchmark is supposed to
 catch.
 
-The `ann k` column is the part not to skip. Approximate retrieval does not
-merely find the same nodes faster — it assembles a partly *different* working
-set, 10% larger at 300 turns and 16% smaller at 3,000. Correctness is identical
-at every size, and `run_scaling` asserts that with a live `assert_eq!` — checked
-by deliberately diverging the approximate path and confirming the benchmark
+The `ann k` column is the part not to skip, and the retune improved it most.
+Approximate retrieval previously assembled a partly *different* working set —
+10% larger at 300 turns and 16% smaller at 3,000 (ann k 267/287/278 against
+145.1). After the retune the two paths assemble the *same* working set at every
+size (ann k = mean k = 145.1), identical correctness holds at every size, and
+`run_scaling` asserts correctness with a live `assert_eq!` — checked by
+deliberately diverging the approximate path and confirming the benchmark
 aborts, because the check was previously a `debug_assert!` that `--release`
 compiled out, making it a control that could not fire inside the table it
-guarded. Four rows still do not establish equivalence.
+guarded. Four rows and one corpus do not establish equivalence.
 
 That check is reproducible, and worth reproducing rather than believing:
 

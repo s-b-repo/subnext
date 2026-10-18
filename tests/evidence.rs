@@ -66,7 +66,7 @@ fn only_read_or_computed_material_counts_as_grounds() {
 #[test]
 fn ingested_material_is_observed() {
     let rt = runtime();
-    assert!(rt.graph.len() > 0);
+    assert!(!rt.graph.is_empty());
     for node in rt.graph.nodes() {
         assert_eq!(
             node.origin,

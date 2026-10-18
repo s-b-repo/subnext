@@ -109,7 +109,18 @@ derived figure whose inputs were corrected, and answers a question history never
 addresses. Both are real, neither is fixed, and both are reported.
 Full numbers, scaling table, and caveats: [RESULTS.md](RESULTS.md).
 
-Memory is persisted either as a plain JSON file or as a **`.context`
+## Research-backed extensions
+
+The runtime now includes modules implementing research-backed improvements:
+
+- `eviction` — reactivation-aware eviction, partial-session eviction, near-LRU baseline.
+- `scheduler` — combined residency scheduler, cancellable speculative reads, learned tiered placement.
+- `durability` — rollback consistency guard, recoverable session contract, resident KV claims.
+- `authorization` — external PDP/PEP split, scoped tokens, fail-closed default-deny, audit logging.
+- `context_assembly` — static header/dynamic trailer, stable ordering, escalation-as-append.
+
+See [`docs/research-improvements.md`](docs/research-improvements.md) for details.
+
 container** — content-addressed objects under a Merkle root, checkpoints chained
 so that editing history invalidates everything after it, and a generation
 high-water mark that refuses a rollback. An edited JSON store reloads silently;
@@ -203,15 +214,15 @@ than deleted because it stood here as a reason not to use this.
 at once and no lock is exercised. Do not deploy it under concurrent ingest on
 the strength of these numbers.
 
-**Very large N where planning cost matters.** Retrieval is not the bottleneck —
-an LSH index prunes ~96% of scored vectors, on the corpus with 21 distinct
-documents, which does not separate pruned vectors from pruned duplicates.
-`bench --recall` prices that pruning: top-12 overlap with the exact scan is
-**54.8% at 3,000 turns** (100% at 300), correctness unchanged at 7/7. Doubling
-the tables makes recall *worse*, not better, because larger candidate sets trip
-the exact-scan fallback less often. The
-cost was in the planner, and `bench --stages` now clocks each stage separately
-and publishes what it rejected. Scoring dominated and grew with history despite a
+**Very large N where planning cost matters.** Retrieval is not the bottleneck.
+`bench --recall` prices the candidate generation: top-12 overlap with the exact
+scan is **94-95% at every size from 300 to 3,000 turns**, identical top-1 at
+7/7, after a retune documented in the geometry note in `src/index.rs`. The
+previously recorded figure on the old geometry (54.8%) was the exact-scan
+fallback firing on small candidate sets at small N and the true LSH recall
+surfacing at scale; the sweep in `examples/lsh_parameter_sweep.rs` prices the
+recall/pruning frontier this embedder allows. Scoring dominated and grew with
+history despite a
 candidate set capped at 120: `available()` and `cost()` each concatenated a
 node's whole span list, and corroboration grows that list with N — 3,529 spans
 concatenated per query at 3,000 turns, now 612. That is a constant factor, not a

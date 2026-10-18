@@ -204,6 +204,10 @@ pub struct StageProfile {
     pub seed_hits: usize,
     pub seed_dropped_floor: usize,
     pub seed_dropped_recency: usize,
+    /// Candidates past the age floor that reactivation-aware pruning spared:
+    /// old, but read often enough (or confident enough) that dropping them
+    /// would be the expensive kind of forgetting.
+    pub seed_spared_reactivation: usize,
     pub seed_dropped_status: usize,
     pub seed_from_spans: usize,
     pub seeds_kept: usize,
@@ -262,6 +266,7 @@ impl std::ops::AddAssign for StageProfile {
         self.seed_hits += rhs.seed_hits;
         self.seed_dropped_floor += rhs.seed_dropped_floor;
         self.seed_dropped_recency += rhs.seed_dropped_recency;
+        self.seed_spared_reactivation += rhs.seed_spared_reactivation;
         self.seed_dropped_status += rhs.seed_dropped_status;
         self.seed_from_spans += rhs.seed_from_spans;
         self.seeds_kept += rhs.seeds_kept;
@@ -386,17 +391,41 @@ impl ActiveContext {
 
     /// The prompt text. Grouped by role, not by score, because a model reads a
     /// labelled state block far more reliably than a ranked list.
+    ///
+    /// Within a group entries are ordered by node identity — creation order,
+    /// since ids are assigned sequentially — never by the per-turn utility
+    /// score. Membership still moves with the knapsack every turn, but the
+    /// *order* of surviving material is stable across turns, which is what lets
+    /// a downstream prompt cache reuse the prefix (`bench --cache`).
     pub fn render(&self) -> String {
         self.render_with_header(true)
     }
 
     pub fn render_with_header(&self, with_header: bool) -> String {
+        self.render_ordered(with_header, true)
+    }
+
+    /// Legacy per-turn utility ordering + leading header, kept for the
+    /// `bench --instrument` before/after comparison. Do not use for assembly.
+    pub fn render_legacy(&self) -> String {
+        self.render_ordered(true, false)
+    }
+
+    pub fn render_legacy_with_header(&self, with_header: bool) -> String {
+        self.render_ordered(with_header, false)
+    }
+
+    pub fn render_ordered(&self, with_header: bool, stable: bool) -> String {
         let mut sorted: Vec<&Admission> = self.entries.iter().collect();
-        sorted.sort_by(|a, b| {
-            b.utility
-                .total_cmp(&a.utility)
-                .then(a.node_id.cmp(&b.node_id))
-        });
+        if stable {
+            sorted.sort_by_key(|e| e.node);
+        } else {
+            sorted.sort_by(|a, b| {
+                b.utility
+                    .total_cmp(&a.utility)
+                    .then(a.node_id.cmp(&b.node_id))
+            });
+        }
 
         let order = [
             (Kind::Goal, "GOALS"),
@@ -409,14 +438,18 @@ impl ActiveContext {
         ];
         let mut blocks: Vec<String> = Vec::new();
         if with_header {
-            blocks.push(format!(
-                "# ACTIVE CONTEXT  (k={}/{} tokens, {} of {} candidates, query type: {})",
-                self.tokens,
-                self.budget,
-                self.entries.len(),
-                self.considered,
-                self.qtype.map(QueryType::as_str).unwrap_or("open")
-            ));
+            if stable {
+                blocks.push("# ACTIVE CONTEXT".to_string());
+            } else {
+                blocks.push(format!(
+                    "# ACTIVE CONTEXT  (k={}/{} tokens, {} of {} candidates, query type: {})",
+                    self.tokens,
+                    self.budget,
+                    self.entries.len(),
+                    self.considered,
+                    self.qtype.map(QueryType::as_str).unwrap_or("open")
+                ));
+            }
         }
         for (kind, title) in order {
             let group: Vec<&&Admission> = sorted.iter().filter(|e| e.kind == kind).collect();
@@ -428,9 +461,39 @@ impl ActiveContext {
                 blocks.push(entry.rendered.clone());
             }
         }
+        if with_header && stable {
+            blocks.push(format!(
+                "\n# k={}/{} tokens, {} of {} candidates, query type: {}",
+                self.tokens,
+                self.budget,
+                self.entries.len(),
+                self.considered,
+                self.qtype.map(QueryType::as_str).unwrap_or("open")
+            ));
+        }
         blocks.join("\n")
     }
 
+    /// Render with an appended `## ESCALATED` block (escalation-as-append), so a
+    /// mid-turn re-plan extends the cache prefix instead of invalidating it.
+    pub fn render_escalated(&self, escalated: &str) -> String {
+        format!("{}\n\n## ESCALATED\n{}", self.render(), escalated)
+    }
+
+    /// Alias for [`Self::render_escalated`].
+    pub fn render_with_escalation(&self, escalated: &str) -> String {
+        self.render_escalated(escalated)
+    }
+
+    /// Alias for [`Self::render_escalated`].
+    pub fn render_escalation(&self, escalated: &str) -> String {
+        self.render_escalated(escalated)
+    }
+
+    /// Append a dynamic trailer (per-turn stats) after stable material.
+    pub fn render_with_trailer(&self, trailer: &str) -> String {
+        format!("{}\n{}", self.render(), trailer)
+    }
     pub fn manifest(&self) -> Vec<(String, Level, usize, f32)> {
         self.entries
             .iter()
@@ -474,6 +537,17 @@ pub struct RelevancePlanner {
     /// ones that reach furthest back: `old fact, never repeated` and
     /// `corrected fact (mid-history)`.
     pub recency_cutoff: f32,
+    /// Reactivation-aware pruning: a candidate past the age floor is dropped
+    /// only when its predicted reactivation probability — recency, read
+    /// frequency and confidence jointly, via [`crate::eviction::ReactivationPredictor`]
+    /// — falls below `reactivation_floor`. Off by default: the
+    /// "when fancy eviction fails" finding predicts plain recency is hard to
+    /// beat, so the predictor has to earn its keep in the A/B
+    /// (`bench --reactivation`) before this belongs in a default.
+    pub reactivation_prune: bool,
+    /// Probability below which an aged candidate is dropped under
+    /// `reactivation_prune`.
+    pub reactivation_floor: f32,
     /// Causal control only. When true the utility function is replaced by a
     /// constant, leaving the candidate set, the corpus, the node count and every
     /// other stage untouched.
@@ -490,6 +564,9 @@ pub struct RelevancePlanner {
     /// return nonzero, so that a zero in production is a fired guard rather
     /// than a guard that was never exercised. Never enable in real use.
     pub admit_stale: bool,
+    /// The reactivation predictor behind `reactivation_prune`. Weights are a
+    /// hand-set prior until the A/B justifies learning them.
+    pub reactivation: crate::eviction::ReactivationPredictor,
 }
 
 impl Default for RelevancePlanner {
@@ -503,8 +580,11 @@ impl Default for RelevancePlanner {
             max_candidates: 120,
             seed_min_ratio: 0.5,
             recency_cutoff: 0.0,
+            reactivation_prune: false,
+            reactivation_floor: 0.5,
             stub_scorer: false,
             admit_stale: false,
+            reactivation: crate::eviction::ReactivationPredictor::default(),
         }
     }
 }
@@ -528,7 +608,7 @@ impl RelevancePlanner {
     pub fn policy_digest(&self) -> String {
         let w = &self.weights;
         let text = format!(
-            "w:{:?}|floor:{}|depth:{}|fanout:{}|cands:{}|decay:{}|stale:{}",
+            "w:{:?}|floor:{}|depth:{}|fanout:{}|cands:{}|decay:{}|stale:{}|reapr:{}|reafloor:{}",
             [
                 w.similarity, w.proximity, w.explain_path, w.confidence,
                 w.read_through, w.recency, w.stale_penalty, w.superseded_source,
@@ -540,6 +620,8 @@ impl RelevancePlanner {
             self.max_candidates,
             self.recency_cutoff,
             self.admit_stale,
+            self.reactivation_prune,
+            self.reactivation_floor,
         );
         crate::hash::sha256(text.as_bytes()).short(12)
     }
@@ -725,23 +807,43 @@ impl RelevancePlanner {
         // Recency prefilter, off by default. Applied before scoring so it is a
         // cost saving rather than a re-ranking: anything older than the cutoff
         // never reaches the utility function at all.
-        let age_floor = if self.recency_cutoff > 0.0 {
+        let age_span = if self.recency_cutoff > 0.0 {
             let stamps: Vec<u64> = ctx.graph.nodes().iter().map(|n| n.timestamp).collect();
             match (stamps.iter().min(), stamps.iter().max()) {
-                (Some(&lo), Some(&hi)) if hi > lo => {
-                    Some(lo + ((hi - lo) as f32 * self.recency_cutoff) as u64)
-                }
+                (Some(&lo), Some(&hi)) if hi > lo => Some((lo, hi)),
                 _ => None,
             }
         } else {
             None
         };
+        let age_floor = age_span
+            .map(|(lo, hi)| lo + ((hi - lo) as f32 * self.recency_cutoff) as u64);
         for (idx, score) in hits {
             let node = ctx.graph.node(idx);
-            if let Some(floor) = age_floor {
+            if let (Some(floor), Some((lo, hi))) = (age_floor, age_span) {
                 if node.timestamp < floor {
-                    active.profile.seed_dropped_recency += 1;
-                    continue;
+                    // Reactivation-aware pruning: age alone is not the whole
+                    // story — an old node that keeps getting read and scores
+                    // well is exactly the item the "fancy eviction fails"
+                    // literature says comes back expensive. Recency maps to
+                    // the predictor's 0..1 scale with 1 = newest.
+                    if self.reactivation_prune {
+                        let recency = 1.0 - (node.timestamp - lo) as f32 / (hi - lo) as f32;
+                        let p = self.reactivation.probability(
+                            recency,
+                            node.read_rate(),
+                            node.confidence,
+                        );
+                        if p >= self.reactivation_floor {
+                            active.profile.seed_spared_reactivation += 1;
+                        } else {
+                            active.profile.seed_dropped_recency += 1;
+                            continue;
+                        }
+                    } else {
+                        active.profile.seed_dropped_recency += 1;
+                        continue;
+                    }
                 }
             }
             // Evidence whose every live dependent has been superseded supports

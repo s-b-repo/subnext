@@ -36,12 +36,16 @@
 //! | [`baselines`] | RAG / summarise-all / recursive context assemblies |
 //! | [`runtime`] | the facade tying it together |
 
+pub mod authorization;
 pub mod baselines;
 pub mod bench;
 pub mod budget;
+pub mod context_assembly;
 pub mod context_store;
 pub mod demo;
+pub mod durability;
 pub mod embed;
+pub mod eviction;
 pub mod execute;
 pub mod graph;
 pub mod hash;
@@ -57,6 +61,7 @@ pub mod planner;
 pub mod policy;
 pub mod runtime;
 pub mod scrub;
+pub mod scheduler;
 pub mod spans;
 pub mod speculation;
 pub mod summarize;
@@ -65,7 +70,25 @@ pub mod text;
 pub mod tokens;
 pub mod trust;
 
-pub use budget::{Allocation, Candidate, Choice, solve};
+pub use authorization::{
+    AuditLog, AuthorizationAuditLog, ContextAwareAuthorization, FailClosedAuthorizer,
+    FullAuditLog, MacaroonToken, Pep, PolicyDecisionPoint, PolicyEnforcementPoint, ScopedAuthToken,
+};
+pub use context_assembly::{EscalationAsAppend, StaticHeaderDynamicTrailer, stable_content_ordering};
+pub use durability::{
+    DurabilityGuarantee, RecoverableSession, RecoverableSessionContract, ResidentKvClaim,
+    ResidentKvConformance, RollbackConsistency, RollbackConsistencyGuard, SessionContract,
+};
+pub use eviction::{
+    CrossSessionEvictionPriority, EvictionCandidate, EvictionPolicy, PartialSessionEviction,
+    PartialSessionEvictor, ReactivationAwareEviction, ReactivationPredictor,
+    RecencyWeightedBaseline, SessionFootprint, recency_weighted_order,
+};
+pub use scheduler::{
+    CancellablePrefetch, CancellableSpeculativeReads, CombinedResidencyScheduler, ExpertPrediction,
+    KvStatePrediction, LearnedCostModel, LearnedTieredPlacement, MemoryPrediction, ResidencyScheduler,
+    TieredPlacement, UnifiedScheduler,
+};
 pub use context_store::{ContextError, ContextStore, ObjectKind, ObjectRecord};
 pub use execute::ExecutionLayer;
 pub use graph::{DcrError, ExplainPath, MemoryGraph};

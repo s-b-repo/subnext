@@ -150,6 +150,148 @@ fn escalation_promotes_a_node_to_raw() {
     assert_eq!(rt.telemetry.report().escalation_rate, Some(1.0));
 }
 
+/// Records every prompt the reasoner is sent, so a test can measure what the
+/// prompt cache would actually see.
+struct RecordingReasoner {
+    inner: LocalReasoner,
+    prompts: Rc<RefCell<Vec<String>>>,
+}
+
+impl Reasoner for RecordingReasoner {
+    fn complete(&mut self, prompt: &str, system: &str) -> String {
+        self.prompts.borrow_mut().push(prompt.to_string());
+        self.inner.complete(prompt, system)
+    }
+}
+
+fn shared_prefix_pct(a: &str, b: &str) -> f64 {
+    let shared = a
+        .as_bytes()
+        .iter()
+        .zip(b.as_bytes())
+        .take_while(|(x, y)| x == y)
+        .count();
+    shared as f64 / a.len().max(1) as f64 * 100.0
+}
+
+#[test]
+fn escalation_append_preserves_the_prompt_prefix() {
+    // The before/after measurement for escalation-as-append, on one turn.
+    //
+    // BEFORE (full re-render): the escalated re-plan rendered the whole
+    // working set again; what the prompt cache would see is
+    // shared_prefix(first prompt, prompt_for(final context)) — whatever
+    // stable ordering survives the membership change.
+    //
+    // AFTER (append): the final prompt is the first prompt plus an
+    // `## ESCALATED` block, so the shared prefix is 100.0 by construction.
+    let mut rt = build(600, 60);
+    rt.ingest(
+        "Deploy log: the rollout moved through canary and 10 percent of the fleet without \
+         incident, then readiness probes began failing against the inventory host. The retry \
+         budget was exhausted after 7 attempts and the final failure code was \
+         ERR_CONN_REFUSED_37, at which point the controller paged on-call.",
+        Some("log"),
+    )
+    .unwrap();
+    let prompts = Rc::new(RefCell::new(Vec::new()));
+    let mut reasoner = RecordingReasoner {
+        inner: LocalReasoner::new(),
+        prompts: Rc::clone(&prompts),
+    };
+    let query = "how many retry attempts were made before the failure?";
+    let answer = rt.ask_with(query, None, &mut reasoner);
+
+    assert_eq!(answer.escalations, 1, "the scenario needs a mid-turn escalation");
+    let sent = prompts.borrow();
+    assert!(sent.len() >= 2, "an escalation re-plans, so two prompts");
+    let first = &sent[0];
+    let last = sent.last().unwrap();
+
+    // AFTER — what the mechanism actually produces.
+    let after = shared_prefix_pct(first, last);
+    assert!(
+        answer.escalated_prompt,
+        "the final prompt must be the append form"
+    );
+    assert!(
+        last.starts_with(first.as_str()),
+        "the append form makes the first prompt a byte-prefix of the final one"
+    );
+    assert!(last.contains("## ESCALATED"), "the delta block is present");
+    assert_eq!(answer.prompt_prefix_pct, 100.0);
+
+    // BEFORE — the same turn under the old strategy: the final plan's full
+    // re-render. Membership grew (the escalated node joined at L0), so the
+    // kind groups shifted and the prefix breaks at the first moved line.
+    let before = shared_prefix_pct(first, &rt.prompt_for(&answer.context));
+    println!(
+        "escalation prompt prefix: full re-render {before:.1}% -> append {after:.1}%"
+    );
+    assert!(
+        before < after,
+        "append ({after:.1}%) must beat full re-render ({before:.1}%) on the same turn"
+    );
+    assert!(
+        answer.text.contains("7 attempts"),
+        "the answer must still be correct from the appended prompt"
+    );
+}
+
+
+#[test]
+fn reactivation_pruning_spares_the_hot_old_candidates() {
+    // The eviction-items integration: the planner's age prefilter is a real
+    // eviction decision, and reactivation awareness changes it. On the
+    // standard corpus every aged candidate is hot (read repeatedly by later
+    // probes), so plain recency drops them and the predictor spares them —
+    // at equal correctness, and without the span-fallback cost the pure
+    // recency path pays.
+    let mut pure = Dcr::new(600);
+    pure.planner.recency_cutoff = 0.5;
+    let corpus = dcr::bench::build_corpus(200);
+    for (doc_id, text) in &corpus.docs {
+        pure.ingest(text, Some(doc_id)).unwrap();
+    }
+    let mut reasoner = LocalReasoner::new();
+    let mut pure_correct = 0;
+    for probe in &corpus.probes {
+        let a = pure.ask_with(probe.query, None, &mut reasoner);
+        if a.text.to_lowercase().contains(&probe.expected.to_lowercase()) {
+            pure_correct += 1;
+        }
+    }
+    assert!(
+        pure.planning.seed_dropped_recency > 0,
+        "pure recency must actually drop candidates at this cutoff"
+    );
+
+    let mut reactivation = Dcr::new(600);
+    reactivation.planner.recency_cutoff = 0.5;
+    reactivation.planner.reactivation_prune = true;
+    for (doc_id, text) in &corpus.docs {
+        reactivation.ingest(text, Some(doc_id)).unwrap();
+    }
+    let mut reasoner = LocalReasoner::new();
+    let mut reactivation_correct = 0;
+    for probe in &corpus.probes {
+        let a = reactivation.ask_with(probe.query, None, &mut reasoner);
+        if a.text.to_lowercase().contains(&probe.expected.to_lowercase()) {
+            reactivation_correct += 1;
+        }
+    }
+    assert!(
+        reactivation.planning.seed_spared_reactivation > 0,
+        "the predictor must spare the hot aged candidates"
+    );
+    assert_eq!(
+        reactivation.planning.seed_dropped_recency, 0,
+        "nothing on this corpus is cold enough to drop"
+    );
+    assert_eq!(reactivation_correct, pure_correct, "no correctness regression");
+    assert_eq!(reactivation_correct, corpus.probes.len());
+}
+
 #[test]
 fn citations_are_recorded_as_read_through() {
     let mut rt = build(600, 60);

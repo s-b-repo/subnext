@@ -181,24 +181,29 @@ of these numbers.
 
 ### Very large N where planning cost matters
 
-Retrieval is not the bottleneck. An LSH index prunes roughly 96% of the vectors
-a query scores and takes the index call to a fraction of a millisecond — a
-figure measured on the *standard* corpus, which emits 21 distinct documents at
-any size, so it does not separate "pruned vectors" from "pruned near-duplicates"
-and should not be read as though it did.
+Retrieval is not the bottleneck. As this paragraph was written, an LSH index
+heavily signed its tables (12 bits) so candidate generation matched only
+near-duplicates and "pruned ~96% of scored vectors" — a figure measured on the
+*standard* corpus, which emits 21 distinct documents at any size, so it did not
+separate "pruned vectors" from "pruned near-duplicates".
 
-Pruning that much is not free, and the report used to defend it with
+Pruning that much was not free, and the report used to defend it with
 "correctness is identical on both paths" — which is seven probes agreeing on an
 answer, not the two paths retrieving the same material. `bench --recall` measures
-the stronger statement: top-12 overlap with the exact scan is 100% at 300 turns,
-58.3% at 1,000, and **54.8% at 3,000**, with correctness unchanged at 7/7 and
-top-1 matching on 6 of 7. Well-tuned approximate indices are usually quoted at
-85-95%.
+the stronger statement, top-12 overlap with the exact scan: on the old geometry
+it read 100% at 300 turns, 58.3% at 1,000 and **54.8% at 3,000** — but the pure
+LSH path measured 14.3% (sweep in `examples/lsh_parameter_sweep.rs`); both
+numbers above 14.3% were the exact-scan fallback on small candidate sets, not
+LSH succeeding. Twelve plane signs separate near-duplicates and nothing else on
+this embedder, which puts neighbours at cosine 0.2-0.45.
 
-Tuning it made it worse in a way worth knowing: doubling the table count drops
-recall to 39.3%, because larger candidate sets trip the exact-scan fallback less
-often — so part of the 54.8% is the approximate path giving up and doing the
-exact thing rather than LSH succeeding. Left at 8 tables and reported.
+Retuned to 8 bits × 16 tables (see the geometry note in `src/index.rs`): recall
+is **94-95% at every size from 300 to 3,000 turns**, identical top-1 at 7/7, the
+candidate set honestly sits at ~55-60% of N, and the approximate path costs the
+same end to end as the exact path (0.9 vs 1.0ms at 3,000 turns) — the old
+geometry's speed advantage *was* the near-duplicate matching. Same embedder, so
+nothing reaches high recall with a sharply pruned set; this is the frontier
+point that does not hide behind the fallback.
 
 The cost was in the planner, and `bench --stages` now says where. Each stage has
 its own clock and publishes what it rejected, an instrument proposed by

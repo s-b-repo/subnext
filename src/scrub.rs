@@ -93,7 +93,7 @@ impl fmt::Display for AuditEvent {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ScrubOptions {
     /// Repair corrupt objects from a verified replica.
     pub repair: bool,
@@ -104,19 +104,6 @@ pub struct ScrubOptions {
     pub seal: bool,
     /// Logical timestamp for the sealing checkpoint.
     pub timestamp: u64,
-}
-
-impl Default for ScrubOptions {
-    fn default() -> Self {
-        // Read-only by default: a scrub that mutates the store on a bare
-        // invocation is a surprise nobody wants at 3am.
-        ScrubOptions {
-            repair: false,
-            quarantine: false,
-            seal: false,
-            timestamp: 0,
-        }
-    }
 }
 
 impl ScrubOptions {

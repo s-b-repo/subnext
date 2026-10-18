@@ -271,3 +271,15 @@ or `apikey` must not assume this gate stops it.
 The rest of the matrix stays informational: a `--strict` over every section
 would require waiving every accepted line above. Re-run the audit after any
 change to `src/` and add a row here for anything new.
+
+## Addendum (2026-10-18): the research-improvements modules
+
+Five modules added under the consolidated gap analysis (`src/eviction.rs`,
+`src/scheduler.rs`, `src/durability.rs`, `src/context_assembly.rs`,
+`src/authorization.rs`) move section A from 83 to 111 gated hit lines. All 28
+new hits are `assert*` inside those files' `#[cfg(test)]` modules — the
+disposition above covers them unchanged: a test that cannot panic cannot fail.
+Section A's non-test panicking forms are unchanged by these modules (the
+`RollbackConsistencyGuard` rewrite removed a fiction rather than adding a
+panic path). Current strict totals: 110 -> 138 gated hit lines, every one of
+them inside a `#[cfg(test)]` module or already dispositioned above.

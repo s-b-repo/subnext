@@ -93,7 +93,7 @@ query ──► classify ──► seed ──► expand edges ──► level-a
 | [speculative context](docs/concepts/speculative-context.md) | `src/speculation.rs` | online predictor, separate budget, feedback |
 | [cost model](docs/concepts/cost-model.md) | `src/telemetry.rs`, `src/bench.rs` | measured, not asserted |
 | [two-system split](docs/architecture/two-system-split.md) | `src/runtime.rs`, `src/llm.rs` | Reasoner sees only `k`; Memory Runtime needs no model |
-| [context integrity](docs/architecture/context-integrity.md) | `src/hash.rs`, `src/merkle.rs`, `src/context_store.rs` | SHA-256, Merkle root, chained generations, anti-rollback |
+| [research extensions](docs/research-improvements.md) | `src/authorization.rs`, `src/context_assembly.rs`, `src/durability.rs`, `src/eviction.rs`, `src/scheduler.rs` | research-backed improvements |
 | [context integrity](docs/architecture/context-integrity.md) | `src/trust.rs`, `src/scrub.rs` | the admission gateway; bit-rot repair from verified replicas |
 | [failure modes](docs/architecture/failure-modes.md) | across the crate | detection / containment / recovery per mode |
 | [alternatives](docs/alternatives.md) | `src/baselines.rs` | the assemblies DCR is measured against |

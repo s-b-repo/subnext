@@ -18,7 +18,7 @@ use std::process::ExitCode;
 
 use dcr::bench::{
     run_ablation, run_baselines, run_benchmark, run_consolidation, run_coverage, run_decay, run_multi_hop, run_channels, run_mutation_probe, run_stages,
-    run_cache_layout, run_fusion, run_recall, run_scaling_diverse, run_subject_control,
+    run_cache_layout, run_cache_instrument, run_fusion, run_recall, run_reactivation, run_scaling_diverse, run_subject_control,
     run_poison,
     run_rebuild, run_scaling, run_sweep, run_tamper,
 };
@@ -389,8 +389,12 @@ fn run() -> Result<(), String> {
                 run_fusion(args.turns, args.budget).map_err(to_err)?;
             } else if has("--cache") {
                 run_cache_layout(args.turns, args.budget).map_err(to_err)?;
+            } else if has("--instrument") {
+                run_cache_instrument(args.turns, args.budget).map_err(to_err)?;
             } else if has("--subject") {
                 run_subject_control(args.turns, args.budget).map_err(to_err)?;
+            } else if has("--reactivation") {
+                run_reactivation(args.turns, args.budget).map_err(to_err)?;
             } else if has("--diverse") {
                 run_scaling_diverse(&[3_000, 10_000, 30_000, 80_000], args.budget).map_err(to_err)?;
             } else if has("--consolidate") {

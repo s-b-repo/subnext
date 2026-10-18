@@ -14,7 +14,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::context_store::{Checkpoint, ContextError, ContextStore, ObjectKind, ObjectRecord};
+use crate::authorization::{
+    AuthorizationAuditLog, PolicyEnforcementPoint,
+};
+use crate::context_assembly::StaticHeaderDynamicTrailer;
+use crate::durability::{RecoverableSessionContract, ResidentKvClaim, RollbackConsistencyGuard};
+use crate::eviction::{PartialSessionEvictor, ReactivationPredictor};
+use crate::scheduler::{CancellableSpeculativeReads, CombinedResidencyScheduler};
 use crate::execute::{ExecutionLayer, Inputs};
 use crate::graph::{DcrError, MemoryGraph};
 use crate::ids::Clock;
@@ -29,6 +35,8 @@ use crate::nodes::{
 use crate::planner::{ActiveContext, PlanCtx, RelevancePlanner, Weights};
 use crate::policy::DecisionPolicy;
 use crate::spans::{Document, RawStore, Span};
+use crate::context_store::Checkpoint;
+use crate::{ContextStore, ContextError, ObjectRecord, ObjectKind};
 use crate::speculation::Speculator;
 use crate::telemetry::{Telemetry, Turn};
 use crate::tokens::Estimator;
@@ -52,6 +60,24 @@ pub struct Answer {
     /// caller that cannot tell that apart from "the history does not contain
     /// it" is being handed the degraded path without being told.
     pub escalation_refused: bool,
+    /// True when the final prompt was rendered as the previous prompt plus an
+    /// appended `## ESCALATED` block — a byte-identical prefix, so a
+    /// downstream prompt cache reuses everything already computed — rather
+    /// than a full re-render. False for single-prompt turns and for turns
+    /// whose re-plan followed a consistency violation (falsified material
+    /// must not be reused).
+    pub escalated_prompt: bool,
+    /// Shared prefix between the first and the final prompt sent this turn,
+    /// as a percentage of the first prompt's length. 100.0 for a turn that
+    /// sent one prompt. This is the escalation-append mechanism's measured
+    /// claim; a full re-render scores whatever stable ordering survives the
+    /// membership change.
+    pub prompt_prefix_pct: f64,
+    /// Characters in the final prompt actually sent. With an appended
+    /// escalation this exceeds the plan's own token count, because the
+    /// prefix is deliberately resent — recorded rather than hidden, so the
+    /// cache discount and the resend cost are visible in the same row.
+    pub prompt_chars: usize,
 }
 
 /// Returned when the reasoner requested a level the runtime would not serve.
@@ -102,9 +128,21 @@ pub struct Dcr {
     pub planning: crate::planner::StageProfile,
     /// Turns planned, so `planning` can be reported per turn.
     pub plans: u64,
-    assembled_spans: std::collections::HashSet<String>,
+    /// Research-backed residency/eviction support.
+    pub reactivation: ReactivationPredictor,
+    pub eviction: PartialSessionEvictor,
+    pub residency: CombinedResidencyScheduler,
+    pub rollback: RollbackConsistencyGuard,
+    pub session_contract: RecoverableSessionContract,
+    pub resident_claims: Vec<ResidentKvClaim>,
+    pub authorizer: PolicyEnforcementPoint,
+    pub audit_log: AuthorizationAuditLog,
+    pub cancellable_reads: CancellableSpeculativeReads,
+    pub context_assembly: StaticHeaderDynamicTrailer,
     /// Ordered pairs of spans ever rendered at L0 in the *same* window.
     assembled_pairs: std::collections::HashSet<(String, String)>,
+    /// Set of spans ever assembled at L0.
+    assembled_spans: std::collections::HashSet<String>,
     reasoner: Box<dyn Reasoner>,
 }
 
@@ -141,6 +179,16 @@ impl Dcr {
             plans: 0,
             assembled_spans: std::collections::HashSet::new(),
             assembled_pairs: std::collections::HashSet::new(),
+            reactivation: ReactivationPredictor::default(),
+            eviction: PartialSessionEvictor::default(),
+            residency: CombinedResidencyScheduler::new(),
+            rollback: RollbackConsistencyGuard::default(),
+            session_contract: RecoverableSessionContract::new("default", budget),
+            resident_claims: Vec::new(),
+            authorizer: PolicyEnforcementPoint::default(),
+            audit_log: AuthorizationAuditLog::default(),
+            cancellable_reads: CancellableSpeculativeReads::default(),
+            context_assembly: StaticHeaderDynamicTrailer,
             reasoner: Box::new(LocalReasoner::new()),
         }
     }
@@ -280,10 +328,56 @@ impl Dcr {
         let mut escalation_refused = false;
         let mut replanned = false;
         let mut consistency_retries = 0u32;
+        // Append-only re-plan state. `previous_prompt` is the prompt the
+        // reasoner actually saw last iteration; `None` means "no reusable
+        // prefix" (first iteration, or the previous prompt contained
+        // falsified material).
+        let mut previous_prompt: Option<String> = None;
+        let mut first_prompt: Option<String> = None;
+        let mut last_prompt;
+        let mut escalated_prompt;
 
         let (text, context) = loop {
             let context = self.plan_with(query, Some(budget), &pin, &force);
-            let text = reasoner.complete(&self.prompt_for(&context), REASONER_SYSTEM);
+            // The re-planned prompt is the previous prompt plus an
+            // `## ESCALATED` block holding only the material that changed:
+            // the reasoner sees a byte-identical prefix, so a downstream
+            // prompt cache reuses everything it already computed. An
+            // escalation can also promote a node that was present at a lower
+            // level to L0 — same id, richer text — so the delta compares
+            // rendered lines, not node ids. A consistency violation takes
+            // the full re-render instead: its prefix contains falsified
+            // material and must not be reused.
+            let (prompt, appended) = match &previous_prompt {
+                Some(prev) => {
+                    let mut delta: Vec<&str> = context
+                        .entries
+                        .iter()
+                        .map(|e| e.rendered.as_str())
+                        .filter(|line| !prev.contains(line))
+                        .collect();
+                    if delta.is_empty() {
+                        (prev.clone(), false)
+                    } else {
+                        delta.sort_unstable();
+                        (
+                            format!(
+                                "{}\n\n## ESCALATED\n{}",
+                                prev.trim_end(),
+                                delta.join("\n")
+                            ),
+                            true,
+                        )
+                    }
+                }
+                None => (self.prompt_for(&context), false),
+            };
+            if first_prompt.is_none() {
+                first_prompt = Some(prompt.clone());
+            }
+            last_prompt = prompt.clone();
+            escalated_prompt = appended;
+            let text = reasoner.complete(&prompt, REASONER_SYSTEM);
             consolidate(&mut self.graph);
 
             // The Reasoner has been thinking; the Memory Runtime may have
@@ -292,6 +386,12 @@ impl Dcr {
             // answer is discarded and the workspace rebuilt rather than
             // returned from state that no longer holds.
             if self.consistency_violation(&context) && consistency_retries < 1 {
+                // The previously sent prompt contained material that has
+                // since been falsified. Its cached prefix must not be reused:
+                // the retry re-renders from scratch, and the discard is
+                // recorded rather than fictionalized as a "clear".
+                self.rollback.discard_working_set("workspace");
+                previous_prompt = None;
                 consistency_retries += 1;
                 replanned = true;
                 continue;
@@ -315,6 +415,9 @@ impl Dcr {
                     if !pin.contains(&idx) {
                         pin.push(idx);
                     }
+                    // The prompt just sent was not falsified — the violation
+                    // check above passed — so the retry may append to it.
+                    previous_prompt = Some(prompt);
                     continue;
                 }
             }
@@ -330,6 +433,7 @@ impl Dcr {
             // passed however reachable the answer was. A control that cannot
             // pass is as uninformative as one that cannot fail.
             if parse_escalation(&text).is_some() {
+                self.audit_log.log("runtime", "escalate", "context", &text, false, "budget exhausted");
                 escalation_refused = true;
                 break (UNSERVED_ESCALATION.to_string(), context);
             }
@@ -373,6 +477,24 @@ impl Dcr {
         self.speculator.feedback(&cited_idx);
         self.mark_assembled(&context);
 
+        // The escalation-append claim lives in this number: shared prefix
+        // between the first and the final prompt sent this turn, as a
+        // percentage of the first prompt's length. A full re-render on an
+        // escalated turn scores whatever stable ordering survives the
+        // membership change; the append form scores 100.0 by construction.
+        let prompt_prefix_pct = match &first_prompt {
+            Some(first) => {
+                let shared = first
+                    .as_bytes()
+                    .iter()
+                    .zip(last_prompt.as_bytes())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                shared as f64 / first.len().max(1) as f64 * 100.0
+            }
+            None => 0.0,
+        };
+
         Answer {
             tokens: context.tokens,
             text,
@@ -381,6 +503,9 @@ impl Dcr {
             cited,
             replanned,
             escalation_refused,
+            escalated_prompt,
+            prompt_prefix_pct,
+            prompt_chars: last_prompt.chars().count(),
         }
     }
 
@@ -1012,7 +1137,7 @@ impl Dcr {
         // Insertion order is load-bearing for spans (seq) and for the graph's
         // own indices, so restore in the order the runtime wrote them.
         documents.sort_by(|a, b| a.ts.cmp(&b.ts).then(a.id.cmp(&b.id)));
-        spans.sort_by(|a, b| a.seq.cmp(&b.seq));
+        spans.sort_by_key(|s| s.seq);
         let clock = spans.iter().map(|s| s.ts).max().unwrap_or(0);
         runtime.raw.restore(documents, spans);
 

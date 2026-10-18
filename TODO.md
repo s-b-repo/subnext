@@ -580,18 +580,42 @@ materially cheaper at the same token count.
 
 This runtime optimises against that. It re-solves the knapsack every turn to
 assemble the cheapest *sufficient* context, which is by construction a different
-context. Measured (`bench --cache`): **1.0% of assembled tokens are a shared
-prefix with the previous turn** — 36 of 3,504, and the 36 is a header.
+context. Measured (`bench --cache`), as this item was written: **1.0% of
+assembled tokens are a shared prefix with the previous turn** — 36 of 3,504, and
+the 36 was the per-turn header counting tokens on the first line of every turn.
 
-So `457 tokens per query` counts *assembled* tokens, not *billable* ones. A
-cache-friendly assembler sending more tokens could be cheaper per turn, and
-nothing here has run that comparison. That is the honest scope of the cost claim
-and the report should carry it.
+**Fixed.** The reorderer was the planner's per-turn utility sort inside
+`ActiveContext::render_with_header`: surviving blocks changed byte position
+between turns even when their content did not, so no prefix longer than the
+header could ever be reused. The render now orders blocks by node id — stable
+across turns — and the per-turn numbers (k, budget, candidate count, query
+type) moved from a leading header to a trailing line, so they stop poisoning
+the prefix. Measured at the same commit as the fix (`bench --instrument` runs
+the same bench with the old ordering for comparison):
 
-**What would settle it:** price both under a real provider's cached/uncached
-split — full history with a stable prefix against DCR's re-planned context — and
-report cost per turn rather than tokens per turn. The answer might not favour
-this design, which is the reason to run it.
+| probe                       | shared prefix, before | shared prefix, after |
+|---                          |---:|---:|
+| corrected fact (mid-history)| 0.0% | 0.0% |
+| corrected fact (late)       | 3.9% | 46.4% |
+| old fact, never repeated    | 3.8% | 43.8% |
+| exact quote                 | 4.4% | 8.8% |
+| justification / multi-hop   | 2.8% | 5.7% |
+| detail buried in a long span| 2.1% | 24.3% |
+| corrected fact (very late)  | 4.3% | 49.6% |
+| **overall**                 | **2.8%** (36/1293) | **23.6%** (305/1293) |
+
+The rows still near zero are the ones where membership itself moves between the
+two turns — ordering stability cannot save a block that was replaced. The
+instrument now counts that distinction (*ordering churn*: 2 of 12 surviving
+blocks moved position between consecutive turns, 16.7%, down from every turn)
+rather than reporting an undifferentiated prefix percentage.
+
+The caveat stands and is the honest scope of the cost claim: `145 tokens per
+query` counts *assembled* tokens, not *billable* ones. A cache-friendly
+assembler sending more tokens could still be cheaper per turn, and nothing here
+has run that comparison. What would settle it: price both under a real
+provider's cached/uncached split and report cost per turn. The answer might not
+favour this design.
 
 **Not adopted from the same source, and why.** Their fixed per-region budgets
 (pinned / summary / retrieved / recent) are strictly weaker than a knapsack over
@@ -608,12 +632,13 @@ the comparison was more useful for what it exposed than for its own result.
 
 ---
 
-## 18. Recall is the honest measure of the approximate index, and it is 54.8%
+## 18. Recall is the honest measure of the approximate index — retuned from a parameterisation error to 94-95%
 
 Prompted by the same source quoting 85-95% recall for well-tuned approximate
 indices — a metric this report does not use.
 
-`bench --recall`, top-k overlap against the exact scan:
+`bench --recall`, top-k overlap against the exact scan. First as found
+(12-bit tables, single-bit probe, 8 tables):
 
 | turns | nodes | recall@12 | identical top-1 |
 |---:|---:|---:|---:|
@@ -626,11 +651,43 @@ seven probes agreeing on an answer while the two paths retrieve substantially
 different material — a much weaker guarantee than the phrase implies, and the
 probe set cannot distinguish them.
 
-**Tuning made it worse, instructively.** Doubling the table count drops recall to
-39.3%, because larger candidate sets trip the exact-scan fallback less often. So
-part of the 54.8% is the approximate path *giving up and doing the exact thing*,
-not LSH succeeding — the number is partly a fallback frequency. Left at 8 tables
-and reported rather than tuned to a nicer figure.
+**Two defects underneath the number, both found and fixed.**
+
+*The small-N 100% was the fallback.* A candidate set below k falls back to the
+exact scan; at 298 nodes the probed buckets supplied ~8 candidates, so the
+"approximate" path was exact scan in disguise. The 58-55% band is where the
+fallback stops firing and the true LSH recall surfaces.
+
+*The true recall, without the fallback, was 14.3%.* A sweep over plane counts
+and probe radii against the exact top-12
+(`examples/lsh_parameter_sweep.rs`) showed the old geometry was a
+parameterisation error: twelve plane signs per table only separate
+near-duplicates, while this embedder puts relevant neighbours at cosine
+0.2-0.45, where per-bit signature agreement carries no signal. No probe radius
+recovers that at 12 bits — the nearest reachable probe is half the bucket
+space, which is an exact scan by another name.
+
+**The retune** — 8 bits × 16 tables (short tables, more of them, still
+single-bit probe) — measured on the same bench:
+
+| turns | nodes | recall@12 | identical top-1 |
+|---:|---:|---:|---:|
+| 300 | 298 | 94.0% | 7/7 |
+| 1,000 | 911 | 90.5% | 7/7 |
+| 3,000 | 2,661 | 95.2% | 7/7 |
+
+Inside the 85-95% band from the source, at every size, with the fallback no
+longer doing the work. The cost, stated plainly: the candidate set is now
+~55-60% of N (the 12-bit config pruned to ~5% *and matched 14% of the
+neighbours it was supposed to prune*) and the approximate path is no longer
+faster end to end — both paths cost planning-dominated latency within
+measurement noise (`bench --scaling`: 0.9 vs 1.0ms at 3,000 turns).
+Recall and pruning trade along a frontier the sweep documents; nothing reaches
+high recall with a sharply pruned set on this embedder, so the shipped config
+is the frontier point that does not hide behind the fallback.
+
+Correctness unchanged on both paths (7/7 standard, unchanged adversarial rows),
+164 tests green.
 
 ---
 
