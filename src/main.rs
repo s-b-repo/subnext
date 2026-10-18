@@ -38,6 +38,9 @@ commands:
   ingest <path>...            index files or directories into the memory runtime
   ask <query> [--show-context]  plan a working set and answer a question
   plan <query> [--explain]    show the active context without calling a model
+  skill add <name> <adapter> [description...]
+                              register a capability (adapter = content hash/URI)
+  skill list                  show registered skills
   explain <node_id>           audit path from a node down to raw spans
   stats                       telemetry report
   verify                      check a .context container: objects, chain, root
@@ -45,6 +48,9 @@ commands:
   checkpoint                  seal the current state as a new generation
   quarantine                  list objects that failed verification
   demo                        worked example through all four ladder levels
+  serve [--port N] [--sessions N]
+                              share sessions over TCP: ASK/INGEST, one runtime
+                              per conversation (default port 7878, 256 sessions)
   bench [--turns N] [--window N]
                               DCR vs full context vs sliding window
         --scaling             does k stay flat while history grows?
@@ -72,6 +78,18 @@ options:
   --replica PATH              extra full copy of the object store; repeatable.
                               Repair reads only from a copy that verifies.
   --budget N                  B_attention, in tokens (default: 1200)
+  --prefix-stable             ask/plan: render with a turn-invariant header and
+                              content-addressed ordering, so consecutive turns
+                              share a cacheable prefix (see bench --cache)
+  --stickiness W              ask/plan: utility bonus W for nodes retained from
+                              the previous window (default: 0, off)
+  --endpoint HOST:PORT        ask: answer with an OpenAI-compatible local server
+                              (peregrine-serve, vLLM) instead of the offline
+                              line-matcher
+  --model NAME                model field sent to --endpoint (default: peregrine)
+  --fit-gate                  ask: when the whole store fits in the window, send
+                              raw history instead of planning (needs a reasoner
+                              that reads raw text — see --endpoint)
 ";
 
 struct Args {
@@ -83,6 +101,11 @@ struct Args {
     turns: usize,
     window: usize,
     replicas: Vec<PathBuf>,
+    stickiness: Option<f32>,
+    endpoint: Option<String>,
+    model: Option<String>,
+    port: u16,
+    sessions: usize,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -94,6 +117,11 @@ fn parse_args() -> Result<Args, String> {
     let mut positional = Vec::new();
     let mut flags = Vec::new();
     let mut replicas: Vec<PathBuf> = Vec::new();
+    let mut stickiness: Option<f32> = None;
+    let mut endpoint: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut port: u16 = 7878;
+    let mut sessions: usize = 256;
 
     let mut argv = std::env::args().skip(1);
     while let Some(arg) = argv.next() {
@@ -123,6 +151,32 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|_| "--window must be a number")?
             }
+            "--stickiness" => {
+                stickiness = Some(
+                    argv.next()
+                        .ok_or("--stickiness needs a weight")?
+                        .parse()
+                        .map_err(|_| "--stickiness must be a number")?,
+                )
+            }
+            "--endpoint" => {
+                endpoint = Some(argv.next().ok_or("--endpoint needs host:port")?)
+            }
+            "--model" => model = Some(argv.next().ok_or("--model needs a name")?),
+            "--port" => {
+                port = argv
+                    .next()
+                    .ok_or("--port needs a number")?
+                    .parse()
+                    .map_err(|_| "--port must be a number")?
+            }
+            "--sessions" => {
+                sessions = argv
+                    .next()
+                    .ok_or("--sessions needs a number")?
+                    .parse()
+                    .map_err(|_| "--sessions must be a number")?
+            }
             "-h" | "--help" => return Err(USAGE.to_string()),
             flag if flag.starts_with("--") => flags.push(flag.to_string()),
             value if command.is_empty() => command = value.to_string(),
@@ -141,6 +195,11 @@ fn parse_args() -> Result<Args, String> {
         turns,
         window,
         replicas,
+        stickiness,
+        endpoint,
+        model,
+        port,
+        sessions,
     })
 }
 
@@ -278,10 +337,28 @@ fn run() -> Result<(), String> {
         "ask" => {
             let query = args.positional.first().ok_or("ask needs a query")?;
             let mut runtime = open(&args.store, args.budget).map_err(to_err)?;
+            runtime.prefix_stable = args.flags.iter().any(|f| f == "--prefix-stable");
+            runtime.fit_gate = args.flags.iter().any(|f| f == "--fit-gate");
+            if let Some(w) = args.stickiness {
+                runtime.planner.weights.stickiness = w;
+            }
+            if let Some(endpoint) = &args.endpoint {
+                runtime.set_reasoner(Box::new(dcr::llm::HttpReasoner::new(
+                    endpoint.clone(),
+                    args.model.clone().unwrap_or_else(|| "peregrine".to_string()),
+                )));
+            }
+            if runtime.fit_gate && args.endpoint.is_none() {
+                eprintln!(
+                    "warning: --fit-gate without --endpoint sends raw history to the offline \
+                     line-matcher, which cannot read it — answers will be empty. The gate is \
+                     meant for a real reasoner (--endpoint HOST:PORT)."
+                );
+            }
             let answer = runtime.ask(query, None);
             println!("{}", answer.text);
             println!(
-                "\n-- {}/{} tokens, {} nodes, {} escalation(s), cited {}",
+                "\n-- {}/{} tokens, {} nodes, {} escalation(s), cited {}{}{}",
                 answer.tokens,
                 args.budget,
                 answer.context.entries.len(),
@@ -290,7 +367,13 @@ fn run() -> Result<(), String> {
                     "nothing".to_string()
                 } else {
                     answer.cited.join(", ")
-                }
+                },
+                if answer.skills.is_empty() {
+                    String::new()
+                } else {
+                    format!(", skills active: {}", answer.skills.join(", "))
+                },
+                if answer.bypassed { ", fit bypass" } else { "" }
             );
             if args.flags.iter().any(|f| f == "--show-context") {
                 println!("\n{}", answer.context.render());
@@ -300,10 +383,60 @@ fn run() -> Result<(), String> {
         "plan" => {
             let query = args.positional.first().ok_or("plan needs a query")?;
             let mut runtime = open(&args.store, args.budget).map_err(to_err)?;
+            if let Some(w) = args.stickiness {
+                runtime.planner.weights.stickiness = w;
+            }
             let context = runtime.plan(query, None);
-            println!("{}", context.render());
+            if args.flags.iter().any(|f| f == "--prefix-stable") {
+                println!("{}", context.render_prefix_stable());
+            } else {
+                println!("{}", context.render());
+            }
             if args.flags.iter().any(|f| f == "--explain") {
                 println!("\n{}", runtime.explain_plan(&context));
+            }
+        }
+        "skill" => {
+            let mut runtime = open(&args.store, args.budget).map_err(to_err)?;
+            match args.positional.first().map(String::as_str) {
+                Some("add") => {
+                    let name = args.positional.get(1).ok_or("skill add needs a name")?;
+                    let adapter = args
+                        .positional
+                        .get(2)
+                        .ok_or("skill add needs an adapter reference (hash or URI)")?;
+                    let description = match args.positional.get(3..) {
+                        Some(words) if !words.is_empty() => words.join(" "),
+                        _ => name.clone(),
+                    };
+                    runtime.add_skill(name, &description, adapter).map_err(to_err)?;
+                    persist(&runtime, &args.store).map_err(to_err)?;
+                    println!("skill {name} registered ({adapter})");
+                }
+                Some("list") => {
+                    let mut found = false;
+                    for node in runtime.graph.nodes() {
+                        if node.kind != dcr::Kind::Skill {
+                            continue;
+                        }
+                        found = true;
+                        println!(
+                            "{:<20} {:<40} {}",
+                            node.key.as_deref().unwrap_or("-"),
+                            node.meta.source.as_deref().unwrap_or("-"),
+                            node.value
+                        );
+                    }
+                    if !found {
+                        println!("no skills registered");
+                    }
+                }
+                _ => {
+                    return Err(
+                        "usage: dcr skill add <name> <adapter> [description...] | dcr skill list"
+                            .to_string(),
+                    )
+                }
             }
         }
         "explain" => {
@@ -378,6 +511,19 @@ fn run() -> Result<(), String> {
         }
         "demo" => {
             run_demo(args.budget).map_err(to_err)?;
+        }
+        "serve" => {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", args.port))
+                .map_err(|e| format!("bind 127.0.0.1:{}: {e}", args.port))?;
+            println!(
+                "dcr serve listening on 127.0.0.1:{} — {} session slots, budget {}",
+                args.port, args.sessions, args.budget
+            );
+            let router = std::sync::Arc::new(std::sync::Mutex::new(dcr::SessionRouter::new(
+                args.budget,
+                args.sessions,
+            )));
+            dcr::sessions::serve(listener, router);
         }
         "bench" => {
             let has = |name: &str| args.flags.iter().any(|f| f == name);

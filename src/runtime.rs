@@ -14,13 +14,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::authorization::{
-    AuthorizationAuditLog, PolicyEnforcementPoint,
-};
+use crate::authorization::{AuthorizationAuditLog, PolicyEnforcementPoint};
 use crate::context_assembly::StaticHeaderDynamicTrailer;
 use crate::durability::{RecoverableSessionContract, ResidentKvClaim, RollbackConsistencyGuard};
 use crate::eviction::{PartialSessionEvictor, ReactivationPredictor};
 use crate::scheduler::{CancellableSpeculativeReads, CombinedResidencyScheduler};
+
+use crate::context_store::{Checkpoint, ContextError, ContextStore, ObjectKind, ObjectRecord};
 use crate::execute::{ExecutionLayer, Inputs};
 use crate::graph::{DcrError, MemoryGraph};
 use crate::ids::Clock;
@@ -34,9 +34,8 @@ use crate::nodes::{
 };
 use crate::planner::{ActiveContext, PlanCtx, RelevancePlanner, Weights};
 use crate::policy::DecisionPolicy;
+use crate::skills::{RecordingLoader, SkillLoader, SkillRef};
 use crate::spans::{Document, RawStore, Span};
-use crate::context_store::Checkpoint;
-use crate::{ContextStore, ContextError, ObjectRecord, ObjectKind};
 use crate::speculation::Speculator;
 use crate::telemetry::{Telemetry, Turn};
 use crate::tokens::Estimator;
@@ -60,23 +59,19 @@ pub struct Answer {
     /// caller that cannot tell that apart from "the history does not contain
     /// it" is being handed the degraded path without being told.
     pub escalation_refused: bool,
+    /// Skills admitted by the turn's final plan and passed to the loader.
+    pub skills: Vec<String>,
+    /// True when the fit gate sent raw history instead of planning — the
+    /// `context` field is empty in that case, and a caller pricing `tokens`
+    /// should know no planner ran.
+    pub bypassed: bool,
     /// True when the final prompt was rendered as the previous prompt plus an
-    /// appended `## ESCALATED` block — a byte-identical prefix, so a
-    /// downstream prompt cache reuses everything already computed — rather
-    /// than a full re-render. False for single-prompt turns and for turns
-    /// whose re-plan followed a consistency violation (falsified material
-    /// must not be reused).
+    /// appended `## ESCALATED` block.
     pub escalated_prompt: bool,
     /// Shared prefix between the first and the final prompt sent this turn,
-    /// as a percentage of the first prompt's length. 100.0 for a turn that
-    /// sent one prompt. This is the escalation-append mechanism's measured
-    /// claim; a full re-render scores whatever stable ordering survives the
-    /// membership change.
+    /// as a percentage of the first prompt's length.
     pub prompt_prefix_pct: f64,
-    /// Characters in the final prompt actually sent. With an appended
-    /// escalation this exceeds the plan's own token count, because the
-    /// prefix is deliberately resent — recorded rather than hidden, so the
-    /// cache discount and the resend cost are visible in the same row.
+    /// Characters in the final prompt actually sent.
     pub prompt_chars: usize,
 }
 
@@ -86,6 +81,12 @@ pub struct Answer {
 /// window is usable, because that is what the situation is from the caller's
 /// side: the model declined to answer from what it was given.
 pub const UNSERVED_ESCALATION: &str = "I don't have that in the active context.";
+
+/// Slack the fit gate adds to the history estimate before comparing against
+/// the budget: the bypass prompt's header, the QUESTION wrapper and answer
+/// headroom are not part of `history_tokens`. A constant, because the wrapper
+/// is fixed and the header is one line.
+const FIT_PROMPT_OVERHEAD: usize = 32;
 
 pub struct Dcr {
     pub clock: Clock,
@@ -114,6 +115,17 @@ pub struct Dcr {
     /// turns that would not have escalated, and a harness that *can* signal
     /// should be believed rather than second-guessed.
     pub auto_escalate: bool,
+    /// Render prompts with [`ActiveContext::render_prefix_stable`] instead of
+    /// the ranked layout: a turn-invariant header, content-addressed ordering
+    /// and per-turn stats in a trailer, so consecutive turns share a cached
+    /// prefix up to the first membership change. Off by default — the ranked
+    /// layout is what every published number was measured with.
+    pub prefix_stable: bool,
+    /// When the whole store fits in the window, skip indexing and the
+    /// knapsack and send the raw history instead — see [`crate::fit`]. Off by
+    /// default: the bypass sends raw text, which `LocalReasoner` cannot read,
+    /// so enabling it is a statement about the reasoner, not just the store.
+    pub fit_gate: bool,
     /// Every source span that has appeared in an assembled context, ever.
     ///
     /// The dual of `audit_path_completeness`: that metric is a property of
@@ -128,6 +140,20 @@ pub struct Dcr {
     pub planning: crate::planner::StageProfile,
     /// Turns planned, so `planning` can be reported per turn.
     pub plans: u64,
+    assembled_spans: std::collections::HashSet<String>,
+    /// Ordered pairs of spans ever rendered at L0 in the *same* window.
+    assembled_pairs: std::collections::HashSet<(String, String)>,
+    reasoner: Box<dyn Reasoner>,
+    /// Loads the artifacts admitted [`Kind::Skill`] nodes name. Admission in a
+    /// turn's final plan is the trigger; the default is inert and recording,
+    /// and a serving stack (multi-LoRA, peregrine) plugs in here.
+    pub skills: Box<dyn SkillLoader>,
+    /// Node ids admitted by the previous plan — the `S_prev` the stickiness
+    /// weight scores against. Empty until the first plan completes.
+    pub last_assembly: std::collections::HashSet<String>,
+    /// The prompt sent last turn, kept so `prefix_reuse` is measured from what
+    /// the reasoner was actually sent rather than recomputed later.
+    last_prompt: Option<String>,
     /// Research-backed residency/eviction support.
     pub reactivation: ReactivationPredictor,
     pub eviction: PartialSessionEvictor,
@@ -139,11 +165,6 @@ pub struct Dcr {
     pub audit_log: AuthorizationAuditLog,
     pub cancellable_reads: CancellableSpeculativeReads,
     pub context_assembly: StaticHeaderDynamicTrailer,
-    /// Ordered pairs of spans ever rendered at L0 in the *same* window.
-    assembled_pairs: std::collections::HashSet<(String, String)>,
-    /// Set of spans ever assembled at L0.
-    assembled_spans: std::collections::HashSet<String>,
-    reasoner: Box<dyn Reasoner>,
 }
 
 impl std::fmt::Debug for Dcr {
@@ -175,10 +196,16 @@ impl Dcr {
             budget,
             max_escalations: 2,
             auto_escalate: false,
+            prefix_stable: false,
+            fit_gate: false,
             planning: crate::planner::StageProfile::default(),
             plans: 0,
             assembled_spans: std::collections::HashSet::new(),
             assembled_pairs: std::collections::HashSet::new(),
+            reasoner: Box::new(LocalReasoner::new()),
+            skills: Box::new(RecordingLoader::new()),
+            last_assembly: std::collections::HashSet::new(),
+            last_prompt: None,
             reactivation: ReactivationPredictor::default(),
             eviction: PartialSessionEvictor::default(),
             residency: CombinedResidencyScheduler::new(),
@@ -189,7 +216,6 @@ impl Dcr {
             audit_log: AuthorizationAuditLog::default(),
             cancellable_reads: CancellableSpeculativeReads::default(),
             context_assembly: StaticHeaderDynamicTrailer,
-            reasoner: Box::new(LocalReasoner::new()),
         }
     }
 
@@ -205,6 +231,23 @@ impl Dcr {
 
     pub fn with_reasoner(mut self, reasoner: Box<dyn Reasoner>) -> Self {
         self.reasoner = reasoner;
+        self
+    }
+
+    /// Swap the reasoner after construction — the CLI needs this because the
+    /// store decides how the runtime is opened, and the flags decide what
+    /// answers.
+    pub fn set_reasoner(&mut self, reasoner: Box<dyn Reasoner>) {
+        self.reasoner = reasoner;
+    }
+
+    pub fn with_prefix_stable(mut self, on: bool) -> Self {
+        self.prefix_stable = on;
+        self
+    }
+
+    pub fn with_skill_loader(mut self, loader: Box<dyn SkillLoader>) -> Self {
+        self.skills = loader;
         self
     }
 
@@ -245,6 +288,38 @@ impl Dcr {
         self.ingest_with_source(&text, Some(&name), Some(path.display().to_string()))
     }
 
+    /// Register a capability the planner can admit. The skill is retrievable
+    /// by its `description` (that is what similarity matches a query against),
+    /// and its admission fires the [`SkillLoader`] once per turn.
+    ///
+    /// `adapter` is the content-addressed artifact reference (`sha256:…`, a
+    /// URI). It is the skill's grounding the way a source span is a fact's:
+    /// the graph refuses a skill that cannot point at its artifact.
+    pub fn add_skill(
+        &mut self,
+        name: &str,
+        description: &str,
+        adapter: &str,
+    ) -> Result<NodeIdx, DcrError> {
+        let node = NewNode::new(Kind::Skill, description)
+            .key(name)
+            .meta(NodeMeta {
+                source: Some(adapter.to_string()),
+                ..Default::default()
+            })
+            .build();
+        let mut ctx = IngestCtx {
+            raw: &mut self.raw,
+            graph: &mut self.graph,
+            index: &mut self.index,
+            ladder: &self.ladder,
+            clock: &self.clock,
+        };
+        let idx = ctx.graph.upsert(node, ctx.raw, ctx.clock)?;
+        self.indexer.reindex(&mut ctx, idx);
+        Ok(idx)
+    }
+
     // -- planning and answering -------------------------------------------
     pub fn plan(&mut self, query: &str, budget: Option<usize>) -> ActiveContext {
         self.plan_with(query, budget, &[], &HashMap::new())
@@ -266,6 +341,7 @@ impl Dcr {
             policy: &self.policy,
             now: self.clock.now(),
             evidence_by_span: &self.indexer.evidence_by_span,
+            last_assembly: &self.last_assembly,
         };
         let context = self.planner.plan(
             &ctx,
@@ -277,11 +353,24 @@ impl Dcr {
         );
         self.planning += context.profile;
         self.plans += 1;
+        // The source of truth for next turn's retention bonus and the
+        // membership diff. Updated per plan, not per turn: an escalation's
+        // re-plan is also a minimal-edit problem.
+        self.last_assembly = context
+            .node_ids()
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
         context
     }
 
     pub fn prompt_for(&self, context: &ActiveContext) -> String {
-        format!("{}\n\nQUESTION: {}\n", context.render(), context.query)
+        let rendered = if self.prefix_stable {
+            context.render_prefix_stable()
+        } else {
+            context.render()
+        };
+        format!("{rendered}\n\nQUESTION: {}\n", context.query)
     }
 
     pub fn ask(&mut self, query: &str, budget: Option<usize>) -> Answer {
@@ -318,6 +407,16 @@ impl Dcr {
         consolidate: &mut dyn FnMut(&mut MemoryGraph),
     ) -> Answer {
         let budget = budget.unwrap_or(self.budget);
+        // The gate must certify the prompt that will actually be sent, not
+        // just the history: the bypass adds a header, a QUESTION wrapper and
+        // the query itself on top of the raw documents.
+        let overhead = self.ladder.estimator.count(query) + FIT_PROMPT_OVERHEAD;
+        if self.fit_gate
+            && crate::fit::assess(&self.graph, self.telemetry.history_tokens + overhead, budget)
+                == crate::fit::Fit::Bypass
+        {
+            return self.ask_bypass(query, budget, reasoner);
+        }
         let mut force: HashMap<NodeIdx, Level> = HashMap::new();
         let mut pin: Vec<NodeIdx> = Vec::new();
         let mut escalations = 0u32;
@@ -334,8 +433,8 @@ impl Dcr {
         // falsified material).
         let mut previous_prompt: Option<String> = None;
         let mut first_prompt: Option<String> = None;
-        let mut last_prompt;
-        let mut escalated_prompt;
+        let mut last_prompt = String::new();
+        let mut escalated_prompt = false;
 
         let (text, context) = loop {
             let context = self.plan_with(query, Some(budget), &pin, &force);
@@ -345,8 +444,8 @@ impl Dcr {
             // prompt cache reuses everything it already computed. An
             // escalation can also promote a node that was present at a lower
             // level to L0 — same id, richer text — so the delta compares
-            // rendered lines, not node ids. A consistency violation takes
-            // the full re-render instead: its prefix contains falsified
+            // rendered lines, not node ids. A consistency violation takes the
+            // full re-render instead: its prefix contains falsified
             // material and must not be reused.
             let (prompt, appended) = match &previous_prompt {
                 Some(prev) => {
@@ -423,15 +522,6 @@ impl Dcr {
             }
             // An escalation the runtime cannot serve must not be returned as
             // the answer.
-            //
-            // It used to be. With `max_escalations = 0` the reasoner still
-            // emitted `#ESCALATE <node>`, nothing consumed it, and the control
-            // token fell through to the caller as the turn's output. That made
-            // the `no escalation` ablation row fail for a reason unrelated to
-            // the mechanism it was ablating: the probe was scored against the
-            // literal string `#ESCALATE clai_...`, so the row could not have
-            // passed however reachable the answer was. A control that cannot
-            // pass is as uninformative as one that cannot fail.
             if parse_escalation(&text).is_some() {
                 self.audit_log.log("runtime", "escalate", "context", &text, false, "budget exhausted");
                 escalation_refused = true;
@@ -476,12 +566,16 @@ impl Dcr {
         });
         self.speculator.feedback(&cited_idx);
         self.mark_assembled(&context);
+        let skills = self.activate_skills(&context);
+
+        // Self-monitoring for the cache layout: the shared-prefix fraction
+        // between this turn's final prompt and the last turn's, in tokens.
+        let prompt = last_prompt.clone();
+        self.note_prompt(prompt);
 
         // The escalation-append claim lives in this number: shared prefix
         // between the first and the final prompt sent this turn, as a
-        // percentage of the first prompt's length. A full re-render on an
-        // escalated turn scores whatever stable ordering survives the
-        // membership change; the append form scores 100.0 by construction.
+        // percentage of the first prompt's length.
         let prompt_prefix_pct = match &first_prompt {
             Some(first) => {
                 let shared = first
@@ -503,9 +597,120 @@ impl Dcr {
             cited,
             replanned,
             escalation_refused,
+            skills,
+            bypassed: false,
             escalated_prompt,
             prompt_prefix_pct,
             prompt_chars: last_prompt.chars().count(),
+        }
+    }
+
+    fn note_prompt(&mut self, prompt: String) {
+        if let Some(previous) = self.last_prompt.replace(prompt.clone()) {
+            let mut shared = previous
+                .as_bytes()
+                .iter()
+                .zip(prompt.as_bytes())
+                .take_while(|(a, b)| a == b)
+                .count();
+            while shared > 0 && !prompt.is_char_boundary(shared) {
+                shared -= 1;
+            }
+            let total = self.ladder.estimator.count(&prompt);
+            let shared_tokens = self.ladder.estimator.count(&prompt[..shared]);
+            self.telemetry
+                .record_prefix_reuse(shared_tokens as f64 / total.max(1) as f64);
+        }
+    }
+
+    /// Fire the loader for every skill the turn's final plan admitted.
+    ///
+    /// Runs after the re-plan loop, not inside it: an escalation rebuilds the
+    /// plan, and activating per re-plan would fire the loader for plans the
+    /// model never saw. A loader failure is counted in telemetry (`skill_load_failures`) and
+    /// reported by omission — the skill does not appear in [`Answer::skills`] —
+    /// which a real backend should treat as a reason to escalate, not answer.
+    /// Note the prompt has already been sent when this runs, so a failure
+    /// means the model answered believing the skill was live; the counter is
+    /// how that surfaces instead of disappearing.
+    fn activate_skills(&mut self, context: &ActiveContext) -> Vec<String> {
+        let mut activated = Vec::new();
+        for entry in &context.entries {
+            if entry.kind != Kind::Skill {
+                continue;
+            }
+            let Some(skill) = SkillRef::from_node(self.graph.node(entry.node)) else {
+                continue;
+            };
+            if self.skills.activate(&skill).is_ok() {
+                activated.push(skill.name);
+            } else {
+                self.telemetry.skill_load_failures += 1;
+            }
+        }
+        activated
+    }
+
+    /// What the fit gate would decide for the current store at the current
+    /// budget — exposed so an operator can see whether DCR is paying rent
+    /// before turning the gate on.
+    pub fn fit(&self) -> crate::fit::Fit {
+        crate::fit::assess(&self.graph, self.telemetry.history_tokens, self.budget)
+    }
+
+    /// The bypass turn: complete raw history, no indexing, no knapsack.
+    /// Reached only when the gate is on and the whole store fits in the
+    /// window — planning could only remove what the budget can hold.
+    fn ask_bypass(&mut self, query: &str, budget: usize, reasoner: &mut dyn Reasoner) -> Answer {
+        let mut prompt = String::from("# HISTORY (complete — the store fits in the window)\n");
+        for doc in self.raw.documents() {
+            prompt.push_str(&doc.text);
+            prompt.push('\n');
+        }
+        prompt.push_str(&format!("\nQUESTION: {query}\n"));
+        let text = reasoner.complete(&prompt, REASONER_SYSTEM);
+        let tokens = self.ladder.estimator.count(&prompt);
+        let qtype = self.policy.classify(query);
+        // Keep the cross-turn state honest: the bypass is still a turn. The
+        // prefix-reuse metric must see this prompt (otherwise it compares
+        // across the bypass as if it never happened), and last turn's planned
+        // membership is gone — a plan after the store outgrows the gate must
+        // not pay a retention bonus toward a window that no longer exists.
+        let prompt_chars = prompt.chars().count();
+        self.note_prompt(prompt);
+        self.last_assembly.clear();
+        self.telemetry.record_turn(Turn {
+            query: query.to_string(),
+            qtype,
+            tokens,
+            budget,
+            admitted: 0,
+            considered: 0,
+            escalations: 0,
+            stale_reads: 0,
+            demotions: 0,
+            overflow: false,
+        });
+        self.telemetry.bypassed += 1;
+        Answer {
+            tokens,
+            text,
+            context: ActiveContext {
+                query: query.to_string(),
+                qtype: Some(qtype),
+                budget,
+                tokens,
+                ..Default::default()
+            },
+            escalations: 0,
+            cited: Vec::new(),
+            replanned: false,
+            escalation_refused: false,
+            skills: Vec::new(),
+            bypassed: true,
+            escalated_prompt: false,
+            prompt_prefix_pct: 0.0,
+            prompt_chars,
         }
     }
 
@@ -687,7 +892,7 @@ impl Dcr {
         Ok(idx)
     }
 
-    pub fn register(&mut self, name: &str, f: impl Fn(&Inputs) -> f64 + 'static) {
+    pub fn register(&mut self, name: &str, f: impl Fn(&Inputs) -> f64 + Send + 'static) {
         self.execution.register(name, f);
     }
 
@@ -1137,7 +1342,7 @@ impl Dcr {
         // Insertion order is load-bearing for spans (seq) and for the graph's
         // own indices, so restore in the order the runtime wrote them.
         documents.sort_by(|a, b| a.ts.cmp(&b.ts).then(a.id.cmp(&b.id)));
-        spans.sort_by_key(|s| s.seq);
+        spans.sort_by(|a, b| a.seq.cmp(&b.seq));
         let clock = spans.iter().map(|s| s.ts).max().unwrap_or(0);
         runtime.raw.restore(documents, spans);
 
@@ -1457,6 +1662,10 @@ fn node_to_json(node: &Node) -> Json {
                 ("l0_yield", Json::num(node.meta.l0_yield.get() as f64)),
                 ("deescalated", Json::Bool(node.meta.deescalated)),
                 ("derivation", derivation),
+                (
+                    "source",
+                    node.meta.source.clone().map_or(Json::Null, Json::Str),
+                ),
             ]),
         ),
     ])
@@ -1505,7 +1714,10 @@ fn node_from_json(data: &Json) -> Node {
             .and_then(Json::as_bool)
             .unwrap_or(false),
         derivation,
-        source: None,
+        // Load-bearing for skill nodes: it is the artifact reference, i.e.
+        // their grounding. Persisted since skills were introduced; older
+        // stores simply have none.
+        source: get_meta("source").and_then(Json::as_str).map(str::to_string),
     };
     Node {
         id: data

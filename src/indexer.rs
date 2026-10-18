@@ -355,11 +355,17 @@ fn next_separator(text: &str, from: usize) -> Option<(usize, usize)> {
             b if b.is_ascii_alphabetic() => {
                 let start = i;
                 let mut end = i;
-                while end < bytes.len() && is_word_char(bytes[end] as char) {
+                // ASCII only: `bytes[x] as char` widens a *byte*, and a lead
+                // byte like 0xE2 widens to 'â' — alphanumeric — so a
+                // Unicode-aware word check would happily advance `end` into
+                // the middle of a multibyte character and slice a non-boundary.
+                while end < bytes.len() && bytes[end].is_ascii() && is_word_char(bytes[end] as char)
+                {
                     end += 1;
                 }
                 let word = text[start..end].to_lowercase();
-                let boundary = start == 0 || !is_word_char(bytes[start - 1] as char);
+                let boundary = start == 0
+                    || (bytes[start - 1].is_ascii() && !is_word_char(bytes[start - 1] as char));
                 if boundary {
                     // Longest match first, so "was replaced by" is not read as
                     // the copula "was" with "replaced by ..." as its value.
@@ -371,7 +377,7 @@ fn next_separator(text: &str, from: usize) -> Option<(usize, usize)> {
                             && text
                                 .as_bytes()
                                 .get(stop)
-                                .is_none_or(|b| !is_word_char(*b as char))
+                                .is_none_or(|b| !(b.is_ascii() && is_word_char(*b as char)))
                         {
                             return Some((start, stop));
                         }
@@ -393,7 +399,7 @@ fn next_separator(text: &str, from: usize) -> Option<(usize, usize)> {
 fn skip_ws(text: &str, from: usize) -> usize {
     let bytes = text.as_bytes();
     let mut i = from;
-    while i < bytes.len() && (bytes[i] as char).is_whitespace() && bytes[i] != b'\n' {
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() && bytes[i] != b'\n' {
         i += 1;
     }
     i
@@ -406,7 +412,7 @@ fn skip_ws(text: &str, from: usize) -> usize {
 fn key_before(text: &str, sep_start: usize) -> Option<(usize, String)> {
     let bytes = text.as_bytes();
     let mut end = sep_start;
-    while end > 0 && (bytes[end - 1] as char).is_whitespace() {
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
         end -= 1;
     }
     if end == 0 {
@@ -416,7 +422,10 @@ fn key_before(text: &str, sep_start: usize) -> Option<(usize, String)> {
     let mut cursor = end;
     for _ in 0..3 {
         let word_end = cursor;
-        while cursor > 0 && (is_word_char(bytes[cursor - 1] as char) || bytes[cursor - 1] == b'-') {
+        while cursor > 0
+            && ((bytes[cursor - 1].is_ascii() && is_word_char(bytes[cursor - 1] as char))
+                || bytes[cursor - 1] == b'-')
+        {
             cursor -= 1;
         }
         if cursor == word_end {
@@ -483,13 +492,16 @@ fn clause_end(text: &str, from: usize, max_chars: usize) -> Option<usize> {
         }
         match bytes[i] {
             b',' | b';' | b'\n' => return Some(i),
-            b'.' if i + 1 >= bytes.len() || (bytes[i + 1] as char).is_whitespace() => {
+            b'.' if i + 1 >= bytes.len() || bytes[i + 1].is_ascii_whitespace() => {
                 return Some(i);
             }
             b' ' | b'\t' => {
                 let word_start = i + 1;
                 let mut word_end = word_start;
-                while word_end < bytes.len() && is_word_char(bytes[word_end] as char) {
+                while word_end < bytes.len()
+                    && bytes[word_end].is_ascii()
+                    && is_word_char(bytes[word_end] as char)
+                {
                     word_end += 1;
                 }
                 let word = text[word_start..word_end].to_lowercase();
@@ -536,7 +548,7 @@ fn matches_word(text: &str, at: usize, word: &str) -> bool {
     }
     text.as_bytes()
         .get(end)
-        .is_none_or(|b| !is_word_char(*b as char))
+        .is_none_or(|b| !(b.is_ascii() && is_word_char(*b as char)))
 }
 
 /// A coordinated clause that restates the subject's *current* value:
