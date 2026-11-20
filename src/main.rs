@@ -23,6 +23,7 @@ use dcr::bench::{
     run_rebuild, run_scaling, run_sweep, run_tamper,
 };
 use dcr::demo::run_demo;
+use dcr::discover::{DiscoverOpts, run as run_discover};
 use dcr::graph::DcrError;
 use dcr::context_store::ContextStore;
 use dcr::runtime::Dcr;
@@ -43,6 +44,9 @@ commands:
   skill list                  show registered skills
   explain <node_id>           audit path from a node down to raw spans
   stats                       telemetry report
+  discover [n] [--same-source]  coherent-but-unproposed bridges between nodes
+  importance [n]              rank nodes by surprise+recency+usage (keep/evict)
+  ark [n]                     cluster nodes; one representative each (coverage)
   verify                      check a .context container: objects, chain, root
   scrub [--repair]            detect bit rot; repair from a verified replica
   checkpoint                  seal the current state as a new generation
@@ -87,6 +91,7 @@ options:
                               (peregrine-serve, vLLM) instead of the offline
                               line-matcher
   --model NAME                model field sent to --endpoint (default: peregrine)
+  --character PATH            plan --identity-core: read live character.jsonl
   --fit-gate                  ask: when the whole store fits in the window, send
                               raw history instead of planning (needs a reasoner
                               that reads raw text — see --endpoint)
@@ -104,6 +109,7 @@ struct Args {
     stickiness: Option<f32>,
     endpoint: Option<String>,
     model: Option<String>,
+    character: Option<PathBuf>,
     port: u16,
     sessions: usize,
 }
@@ -120,6 +126,7 @@ fn parse_args() -> Result<Args, String> {
     let mut stickiness: Option<f32> = None;
     let mut endpoint: Option<String> = None;
     let mut model: Option<String> = None;
+    let mut character: Option<PathBuf> = None;
     let mut port: u16 = 7878;
     let mut sessions: usize = 256;
 
@@ -163,6 +170,11 @@ fn parse_args() -> Result<Args, String> {
                 endpoint = Some(argv.next().ok_or("--endpoint needs host:port")?)
             }
             "--model" => model = Some(argv.next().ok_or("--model needs a name")?),
+            "--character" => {
+                character = Some(PathBuf::from(
+                    argv.next().ok_or("--character needs a path to character.jsonl")?,
+                ))
+            }
             "--port" => {
                 port = argv
                     .next()
@@ -198,6 +210,7 @@ fn parse_args() -> Result<Args, String> {
         stickiness,
         endpoint,
         model,
+        character,
         port,
         sessions,
     })
@@ -387,6 +400,12 @@ fn run() -> Result<(), String> {
                 runtime.planner.weights.stickiness = w;
             }
             let context = runtime.plan(query, None);
+            if args.flags.iter().any(|f| f == "--identity-core") {
+                print!(
+                    "{}",
+                    dcr::identity::render(args.character.as_deref(), dcr::identity::MAX_CORE_CHARS)
+                );
+            }
             if args.flags.iter().any(|f| f == "--prefix-stable") {
                 println!("{}", context.render_prefix_stable());
             } else {
@@ -447,6 +466,27 @@ fn run() -> Result<(), String> {
         "stats" => {
             let runtime = open(&args.store, args.budget).map_err(to_err)?;
             print!("{}", runtime.report());
+        }
+        "discover" => {
+            let runtime = open(&args.store, args.budget).map_err(to_err)?;
+            let mut opts = DiscoverOpts::default();
+            if let Some(n) = args.positional.first().and_then(|x| x.parse::<usize>().ok()) {
+                opts.top = n;
+            }
+            if args.flags.iter().any(|f| f == "--same-source") {
+                opts.cross_source = false;
+            }
+            print!("{}", run_discover(&runtime.graph, &runtime.raw, &opts));
+        }
+        "importance" => {
+            let runtime = open(&args.store, args.budget).map_err(to_err)?;
+            let top = args.positional.first().and_then(|x| x.parse::<usize>().ok()).unwrap_or(10);
+            print!("{}", dcr::importance::run(runtime.graph.nodes(), top));
+        }
+        "ark" => {
+            let runtime = open(&args.store, args.budget).map_err(to_err)?;
+            let top = args.positional.first().and_then(|x| x.parse::<usize>().ok()).unwrap_or(20);
+            print!("{}", dcr::ark::run(runtime.graph.nodes(), 0.5, top));
         }
         "verify" => {
             let store = container(&args.store)?;

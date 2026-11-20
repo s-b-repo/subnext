@@ -434,7 +434,10 @@ impl ActiveContext {
         self.render_ordered(with_header, false)
     }
 
-    pub fn render_ordered(&self, with_header: bool, stable: bool) -> String {
+    // `_stable` is vestigial: the content-addressed, turn-invariant ordering
+    // lives in `render_prefix_stable`; this ranked layout always uses per-turn
+    // utility order (see tests/planner.rs::prefix_stable_orders_by_content_not_utility).
+    pub fn render_ordered(&self, with_header: bool, _stable: bool) -> String {
         let mut sorted: Vec<&Admission> = self.entries.iter().collect();
         sorted.sort_by(|a, b| {
             b.utility

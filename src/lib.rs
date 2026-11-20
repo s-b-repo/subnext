@@ -36,6 +36,7 @@
 //! | [`baselines`] | RAG / summarise-all / recursive context assemblies |
 //! | [`runtime`] | the facade tying it together |
 
+pub mod ark;
 pub mod authorization;
 pub mod baselines;
 pub mod bench;
@@ -43,6 +44,7 @@ pub mod budget;
 pub mod context_assembly;
 pub mod context_store;
 pub mod demo;
+pub mod discover;
 pub mod durability;
 pub mod embed;
 pub mod eviction;
@@ -50,7 +52,9 @@ pub mod execute;
 pub mod fit;
 pub mod graph;
 pub mod hash;
+pub mod identity;
 pub mod ids;
+pub mod importance;
 pub mod index;
 pub mod indexer;
 pub mod json;

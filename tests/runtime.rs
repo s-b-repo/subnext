@@ -153,12 +153,12 @@ fn escalation_promotes_a_node_to_raw() {
 /// prompt cache would actually see.
 struct RecordingReasoner {
     inner: LocalReasoner,
-    prompts: Rc<RefCell<Vec<String>>>,
+    prompts: Arc<Mutex<Vec<String>>>,
 }
 
 impl Reasoner for RecordingReasoner {
     fn complete(&mut self, prompt: &str, system: &str) -> String {
-        self.prompts.borrow_mut().push(prompt.to_string());
+        self.prompts.lock().unwrap().push(prompt.to_string());
         self.inner.complete(prompt, system)
     }
 }
@@ -193,16 +193,16 @@ fn escalation_append_preserves_the_prompt_prefix() {
         Some("log"),
     )
     .unwrap();
-    let prompts = Rc::new(RefCell::new(Vec::new()));
+    let prompts = Arc::new(Mutex::new(Vec::new()));
     let mut reasoner = RecordingReasoner {
         inner: LocalReasoner::new(),
-        prompts: Rc::clone(&prompts),
+        prompts: Arc::clone(&prompts),
     };
     let query = "how many retry attempts were made before the failure?";
     let answer = rt.ask_with(query, None, &mut reasoner);
 
     assert_eq!(answer.escalations, 1, "the scenario needs a mid-turn escalation");
-    let sent = prompts.borrow();
+    let sent = prompts.lock().unwrap();
     assert!(sent.len() >= 2, "an escalation re-plans, so two prompts");
     let first = &sent[0];
     let last = sent.last().unwrap();

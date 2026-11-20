@@ -281,10 +281,9 @@ impl Dcr {
 
     pub fn ingest_file(&mut self, path: &Path) -> Result<IndexResult, DcrError> {
         let text = std::fs::read_to_string(path).map_err(|e| DcrError::Io(e.to_string()))?;
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.display().to_string());
+        // Document identity is the path as given, not just the basename, so a
+        // tree of many repos (every README.md / TODO.md) does not collide on L0.
+        let name = path.display().to_string();
         self.ingest_with_source(&text, Some(&name), Some(path.display().to_string()))
     }
 
@@ -433,8 +432,8 @@ impl Dcr {
         // falsified material).
         let mut previous_prompt: Option<String> = None;
         let mut first_prompt: Option<String> = None;
-        let mut last_prompt = String::new();
-        let mut escalated_prompt = false;
+        let mut last_prompt: String;
+        let mut escalated_prompt: bool;
 
         let (text, context) = loop {
             let context = self.plan_with(query, Some(budget), &pin, &force);
@@ -1342,7 +1341,7 @@ impl Dcr {
         // Insertion order is load-bearing for spans (seq) and for the graph's
         // own indices, so restore in the order the runtime wrote them.
         documents.sort_by(|a, b| a.ts.cmp(&b.ts).then(a.id.cmp(&b.id)));
-        spans.sort_by(|a, b| a.seq.cmp(&b.seq));
+        spans.sort_by_key(|s| s.seq);
         let clock = spans.iter().map(|s| s.ts).max().unwrap_or(0);
         runtime.raw.restore(documents, spans);
 
