@@ -130,11 +130,21 @@ fn search(runtime: &Dcr, store: &Path, query: &str) -> Result<Matches, String> {
     let count = rows.len();
     let snapshot = fingerprint(&rows);
     let lookup = is_lookup(query, runtime.policy.classify(query));
+    let mut seen = std::collections::HashSet::new();
+    let duplicate_rows = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, row)| {
+            let text = row.as_array()?.get(3)?.as_str()?;
+            (!seen.insert(text)).then(|| Json::num(idx as f64))
+        })
+        .collect();
     let request = Json::obj(vec![
         ("snapshot", Json::str(snapshot.clone())),
         ("count", Json::num(count as f64)),
         ("query", Json::str(query)),
         ("limit", Json::num((SEARCH_LIMIT * 2) as f64)),
+        ("duplicate_rows", Json::Arr(duplicate_rows)),
     ]);
     let initial = run("search", &path, None, request)?;
     let ranked = ranked_rows(&rows, &initial, false)?;

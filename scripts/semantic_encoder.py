@@ -171,7 +171,10 @@ def search(path, request):
     scores = vectors @ Encoder(model_path).encode([request["query"]])[0]
     if not np.isfinite(scores).all() or (np.abs(scores) > 1.001).any():
         raise ValueError("invalid similarity scores in semantic index")
-    ranked = np.argsort(-scores, kind="stable")[: request["limit"]]
+    duplicates = np.zeros(len(ids), dtype=bool)
+    duplicates[request["duplicate_rows"]] = True
+    ranked = np.argsort(-scores, kind="stable")
+    ranked = ranked[~duplicates[ranked]][: request["limit"]]
     return [
         [str(ids[i]), int(ranges[i, 0]), int(ranges[i, 1]), float(np.clip(scores[i], -1.0, 1.0))]
         for i in ranked

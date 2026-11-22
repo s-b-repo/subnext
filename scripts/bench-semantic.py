@@ -182,6 +182,16 @@ def main():
             bare_question = read(binary, store, 24, CHALLENGE[-1][0].rstrip("?"))
             assert bare_question and CHALLENGE[-1][2] in bare_question[0]["text"], bare_question
 
+        print("Duplicate passages cannot crowd out the answer")
+        store = root / "repeated-passage"
+        doc = root / "repeated-passage.txt"
+        query, source, answer = CHALLENGE[0]
+        doc.write_text("\n\n".join([source] + [CHALLENGE_DECOYS[3]] * 75), encoding="utf-8")
+        run(binary, store, "ingest", doc)
+        run(binary, store, "semantic-index", "--semantic-model", args.model)
+        hits = read(binary, store, 24, query)
+        assert hits and answer in hits[0]["text"], hits
+
         print("Verbatim answer at the end of a long sentence")
         store = root / "long-passage"
         doc = root / "long-passage.txt"

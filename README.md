@@ -98,8 +98,9 @@ corpus and use the model's prompt width to set the per-request packing limit.
 #### Learned retrieval for compact evidence
 
 `context-read` automatically uses a store's companion semantic index when one
-exists. The shortlist combines vector matches and lexical matches. For factual
-questions, an extractive reader looks for an answer in each passage, and a
+exists. The shortlist combines vector matches and lexical matches. Identical
+passages occupy one slot before reranking. For factual questions, an
+extractive reader looks for an answer in each passage, and a
 second model evaluates weak matches. The index contains derived vectors and
 source coordinates. Subnext resolves every returned passage and answer range
 against the store. Long sentences are indexed in overlapping passages. A
