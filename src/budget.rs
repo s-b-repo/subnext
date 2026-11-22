@@ -73,6 +73,7 @@ impl Candidate {
             .min_by(|a, b| {
                 a.cost
                     .cmp(&b.cost)
+                    .then_with(|| b.utility.total_cmp(&a.utility))
                     .then(a.level.order().cmp(&b.level.order()))
             })
             .copied()
@@ -108,30 +109,29 @@ pub fn solve(
         budget,
         ..Default::default()
     };
-    if budget == 0 || candidates.is_empty() {
-        alloc.dropped = candidates.iter().map(|c| c.node).collect();
-        alloc.overflow = candidates.iter().any(|c| c.pinned);
+    if candidates.is_empty() {
         return alloc;
     }
 
     // Pinned candidates get their cheapest option reserved off the top so a
     // flood of cheap high-utility trivia can never squeeze out a constraint.
     let mut forced: HashMap<NodeIdx, Choice> = HashMap::new();
-    let mut reserved = 0usize;
+    let mut free_budget = Some(budget);
     for candidate in candidates.iter().filter(|c| c.pinned) {
         let Some(option) = candidate.cheapest() else {
+            alloc.overflow = true;
             continue;
         };
-        reserved += option.cost;
+        free_budget = free_budget.and_then(|free| free.checked_sub(option.cost));
         forced.insert(candidate.node, option);
     }
 
-    if reserved > budget {
+    let Some(free_budget) = free_budget else {
         // Not even the mandatory set fits: admit in utility order until full.
         let mut ordered: Vec<(NodeIdx, Choice)> = forced.into_iter().collect();
         ordered.sort_by(|a, b| b.1.utility.total_cmp(&a.1.utility).then(a.0.cmp(&b.0)));
         for (node, option) in ordered {
-            if alloc.tokens + option.cost <= budget {
+            if option.cost <= budget - alloc.tokens {
                 alloc.tokens += option.cost;
                 alloc.utility += option.utility;
                 alloc.chosen.insert(node, option);
@@ -144,11 +144,12 @@ pub fn solve(
             .filter(|n| !alloc.chosen.contains_key(n))
             .collect();
         return alloc;
-    }
+    };
 
-    let free_budget = budget - reserved;
-    let quantum = quantum.unwrap_or_else(|| ceil_div(free_budget, MAX_DP_BUCKETS).max(1));
-    let buckets = (free_budget / quantum).max(1);
+    let quantum = quantum
+        .filter(|&size| size > 0)
+        .unwrap_or_else(|| ceil_div(free_budget, MAX_DP_BUCKETS).max(1));
+    let buckets = free_budget / quantum;
 
     // For a pinned node the DP optimises the *upgrade* from its reserved
     // cheapest option; for everyone else it optimises admission from nothing.

@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
-use dcr::SessionRouter;
+use dcr::{SessionPolicy, SessionRouter, sha256};
 use dcr::sessions::serve;
 
 #[test]
@@ -60,21 +60,38 @@ fn serve_answers_per_session_over_tcp() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
     let router = Arc::new(Mutex::new(SessionRouter::new(800, 8)));
-    std::thread::spawn(move || serve(listener, router));
+    let root = std::env::temp_dir().join(format!("dcr-session-auth-{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("fixture directory");
+    let policy_path = root.join("policy");
+    let stop = root.join("stop");
+    let credential = "1".repeat(64);
+    let digest = sha256(credential.as_bytes()).to_hex();
+    std::fs::write(&policy_path, format!("tester bench write {} {digest}\n", u64::MAX)).expect("policy");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600)).expect("private policy");
+    }
+    let policy = SessionPolicy::open(policy_path, Some(stop.clone())).expect("session policy");
+    let server = std::thread::spawn(move || serve(listener, router, policy));
 
     let mut stream = TcpStream::connect(addr).expect("connect");
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+    writeln!(stream, "AUTH {credential}").expect("authenticate");
+    let mut login = String::new();
+    reader.read_line(&mut login).expect("authentication response");
+    assert_eq!(login.trim(), "OK");
 
     let doc = "The server ip is 10.0.4.12 and the port is 8080.";
     stream
-        .write_all(format!("INGEST ops {}\n{doc}", doc.len()).as_bytes())
+        .write_all(format!("INGEST bench/ops {}\n{doc}", doc.len()).as_bytes())
         .expect("ingest write");
     let mut status = String::new();
     reader.read_line(&mut status).expect("ingest status");
     assert_eq!(status.trim(), "OK", "ingest failed: {status}");
 
     stream
-        .write_all(b"ASK ops what is the server ip?\n")
+        .write_all(b"ASK bench/ops what is the server ip?\n")
         .expect("ask write");
     let mut header = String::new();
     reader.read_line(&mut header).expect("ask header");
@@ -90,7 +107,7 @@ fn serve_answers_per_session_over_tcp() {
 
     // A second session must not see the first session's memory.
     stream
-        .write_all(b"ASK stranger what is the server ip?\n")
+        .write_all(b"ASK bench/stranger what is the server ip?\n")
         .expect("ask write 2");
     let mut header = String::new();
     reader.read_line(&mut header).expect("ask header 2");
@@ -106,4 +123,13 @@ fn serve_answers_per_session_over_tcp() {
         !answer.contains("10.0.4.12"),
         "memory leaked across sessions: {answer}"
     );
+
+    stream.write_all(b"ASK another/ops what is the server ip?\n").expect("workspace request");
+    let mut status = String::new();
+    reader.read_line(&mut status).expect("scope status");
+    assert_eq!(status.trim(), "ERR session access denied");
+
+    std::fs::write(stop, "").expect("stop the fixture");
+    server.join().expect("listener thread").expect("listener stopped");
+    std::fs::remove_dir_all(&root).expect("clean fixture");
 }

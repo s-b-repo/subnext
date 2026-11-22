@@ -2,6 +2,7 @@
 //! get out of the way — and when it does not, the gate must not fire.
 
 use dcr::runtime::Dcr;
+use dcr::tokens::{Estimator, estimate_tokens};
 use dcr::{Fit, Reasoner};
 
 /// A reasoner that reads raw text — what the bypass is actually for. The
@@ -71,13 +72,20 @@ fn a_store_with_skills_never_bypasses() {
     assert_eq!(rt.fit(), Fit::Plan);
 }
 
-/// The gate compares `history + prompt wrapper + query` against the budget,
-/// not history alone: certifying a prompt that then overflows the window
-/// would be the exact failure the gate exists to avoid.
+#[test]
+fn the_offline_reasoner_receives_the_format_it_can_read() {
+    let mut rt = Dcr::new(800);
+    rt.fit_gate = true;
+    rt.ingest("The parcel code is ZX-17.", Some("parcel"))
+        .unwrap();
+    let answer = rt.ask("what is the parcel code?", None);
+    assert!(!answer.bypassed);
+    assert!(answer.text.contains("ZX-17"));
+}
+
 #[test]
 fn the_gate_counts_the_prompt_wrapper_against_the_budget() {
-    // 340 bytes = 85 heuristic tokens, under a budget of 100 — but the query
-    // (~16 tokens) plus the fixed wrapper (32) push the actual prompt over.
+    // The history uses 85 tokens. The query and wrapper push it over 100.
     let mut rt = Dcr::new(100);
     rt.fit_gate = true;
     let doc = "operational detail, ticket references, runbook notes. ".repeat(8);
@@ -90,6 +98,44 @@ fn the_gate_counts_the_prompt_wrapper_against_the_budget() {
         !answer.bypassed,
         "history fits but the full prompt does not — the gate must not fire"
     );
+}
+
+#[test]
+fn the_gate_uses_the_rendered_cost_with_a_custom_tokenizer() {
+    let mut rt = Dcr::new(80).with_estimator(Estimator::Custom(Box::new(|text| {
+        if text.starts_with("# HISTORY\n") {
+            81
+        } else {
+            estimate_tokens(text)
+        }
+    })));
+    rt.fit_gate = true;
+    rt.ingest("The server ip is 10.0.4.12.", Some("ops"))
+        .unwrap();
+
+    assert!(
+        !rt.ask_with("what is the server ip?", None, &mut RawReader)
+            .bypassed
+    );
+    let answer = rt.ask_with("what is the server ip?", Some(81), &mut RawReader);
+    assert!(answer.bypassed);
+    assert_eq!(answer.tokens, 81);
+}
+
+#[test]
+fn the_gate_preserves_corrections_in_a_short_history() {
+    let mut rt = Dcr::new(800);
+    rt.fit_gate = true;
+    rt.ingest("The parcel code is ZX-17.", Some("original"))
+        .unwrap();
+    rt.ingest("Correction: the parcel code is CHECK-2.", Some("revised"))
+        .unwrap();
+
+    assert_eq!(rt.fit(), Fit::Plan);
+    let answer = rt.ask("what is the parcel code?", None);
+    assert!(!answer.bypassed);
+    assert!(answer.text.contains("CHECK-2"));
+    assert!(!answer.context.render().contains("ZX-17"));
 }
 
 /// A bypassed turn is still a turn: it must feed the prefix-reuse metric

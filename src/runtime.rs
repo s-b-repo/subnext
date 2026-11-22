@@ -24,15 +24,15 @@ use crate::context_store::{Checkpoint, ContextError, ContextStore, ObjectKind, O
 use crate::execute::{ExecutionLayer, Inputs};
 use crate::graph::{DcrError, MemoryGraph};
 use crate::ids::Clock;
-use crate::index::HybridIndex;
+use crate::index::{HybridIndex, Namespace};
 use crate::indexer::{IndexResult, IngestCtx, StateIndexer};
 use crate::json::{Json, parse};
-use crate::ladder::{Ladder, Level};
+use crate::ladder::{EvidenceBudget, Ladder, Level};
 use crate::llm::{LocalReasoner, REASONER_SYSTEM, Reasoner, parse_escalation};
 use crate::nodes::{
     Derivation, EdgeType, Kind, LevelCache, NewNode, Node, NodeIdx, NodeMeta, Origin, Status,
 };
-use crate::planner::{ActiveContext, PlanCtx, RelevancePlanner, Weights};
+use crate::planner::{ActiveContext, PlanCtx, PlanOutput, RelevancePlanner, Weights};
 use crate::policy::DecisionPolicy;
 use crate::skills::{RecordingLoader, SkillLoader, SkillRef};
 use crate::spans::{Document, RawStore, Span};
@@ -49,7 +49,9 @@ pub struct Answer {
     pub context: ActiveContext,
     pub escalations: u32,
     pub cited: Vec<String>,
-    pub tokens: usize,  // audit-allow: LM token count, not a credential
+    /// Cost of the evidence in the last prompt, including retained versions
+    /// of entries promoted during escalation. A bypass counts its raw prompt.
+    pub tokens: usize, // audit-allow: LM token count, not a credential
     /// True when a mid-turn invalidation forced the workspace to be rebuilt.
     pub replanned: bool,
     /// The reasoner asked for a richer level and the runtime could not serve
@@ -82,11 +84,8 @@ pub struct Answer {
 /// side: the model declined to answer from what it was given.
 pub const UNSERVED_ESCALATION: &str = "I don't have that in the active context.";
 
-/// Slack the fit gate adds to the history estimate before comparing against
-/// the budget: the bypass prompt's header, the QUESTION wrapper and answer
-/// headroom are not part of `history_tokens`. A constant, because the wrapper
-/// is fixed and the header is one line.
-const FIT_PROMPT_OVERHEAD: usize = 32;
+const HISTORY_SYSTEM: &str = "Answer the question from the supplied history. If the history \
+    does not answer it, say so.";
 
 pub struct Dcr {
     pub clock: Clock,
@@ -121,10 +120,8 @@ pub struct Dcr {
     /// prefix up to the first membership change. Off by default — the ranked
     /// layout is what every published number was measured with.
     pub prefix_stable: bool,
-    /// When the whole store fits in the window, skip indexing and the
-    /// knapsack and send the raw history instead — see [`crate::fit`]. Off by
-    /// default: the bypass sends raw text, which `LocalReasoner` cannot read,
-    /// so enabling it is a statement about the reasoner, not just the store.
+    /// Skip query-time planning when the raw history and question fit and the
+    /// graph adds no required state. Enable for reasoners that read raw text.
     pub fit_gate: bool,
     /// Every source span that has appeared in an assembled context, ever.
     ///
@@ -267,6 +264,7 @@ impl Dcr {
         doc_id: Option<&str>,
         source: Option<String>,
     ) -> Result<IndexResult, DcrError> {
+        let documents_before = self.raw.documents().len();
         let mut ctx = IngestCtx {
             raw: &mut self.raw,
             graph: &mut self.graph,
@@ -275,7 +273,12 @@ impl Dcr {
             clock: &self.clock,
         };
         let result = self.indexer.ingest(&mut ctx, text, doc_id, source)?;
-        self.telemetry.history_tokens += self.ladder.estimator.count(text);
+        if self.raw.documents().len() > documents_before {
+            self.telemetry.history_tokens = self
+                .telemetry
+                .history_tokens
+                .saturating_add(self.ladder.estimator.count(text));
+        }
         Ok(result)
     }
 
@@ -331,6 +334,91 @@ impl Dcr {
         pin: &[NodeIdx],
         force_level: &HashMap<NodeIdx, Level>,
     ) -> ActiveContext {
+        self.plan_for(
+            query,
+            PlanOutput::Context(budget.unwrap_or(self.budget)),
+            pin,
+            force_level,
+        )
+    }
+
+    /// Plan compact text for a runner with a separate provenance channel.
+    /// Matching raw spans can be materialized in the in-memory graph.
+    pub fn plan_evidence(
+        &mut self,
+        query: &str,
+        budget: Option<usize>,
+    ) -> Result<ActiveContext, DcrError> {
+        self.plan_evidence_limited(query, budget, None)
+    }
+
+    /// Limit each candidate to the model runner's available JSON line bytes.
+    pub fn plan_evidence_limited(
+        &mut self,
+        query: &str,
+        budget: Option<usize>,
+        encoded_bytes: Option<usize>,
+    ) -> Result<ActiveContext, DcrError> {
+        self.plan_evidence_with(
+            query,
+            budget,
+            encoded_bytes,
+            &crate::semantic::Matches::default(),
+        )
+    }
+
+    /// Plan compact evidence using learned matches and lexical seeds.
+    pub(crate) fn plan_evidence_with(
+        &mut self,
+        query: &str,
+        budget: Option<usize>,
+        encoded_bytes: Option<usize>,
+        semantic: &crate::semantic::Matches,
+    ) -> Result<ActiveContext, DcrError> {
+        let lexical_matches =
+            self.index
+                .lexical_matches(Namespace::Span, query, self.planner.seed_k);
+        let mut ctx = IngestCtx {
+            raw: &mut self.raw,
+            graph: &mut self.graph,
+            index: &mut self.index,
+            ladder: &self.ladder,
+            clock: &self.clock,
+        };
+        let spans = lexical_matches
+            .into_iter()
+            .map(|(span, _)| span)
+            .chain(semantic.spans.iter().map(|passage| passage.span));
+        for span_idx in spans {
+            let span_id = &ctx.raw.span(span_idx).id;
+            if self.indexer.evidence_by_span.contains_key(span_id) {
+                continue;
+            }
+            let span_id = span_id.clone();
+            let text = ctx.raw.text_of(&span_id).to_string();
+            self.indexer.evidence_node(&mut ctx, &span_id, &text)?;
+        }
+        Ok(self.plan_for(
+            query,
+            PlanOutput::Evidence(
+                EvidenceBudget {
+                    tokens: budget.unwrap_or(self.budget),
+                    encoded_bytes,
+                },
+                semantic,
+            ),
+            &[],
+            &HashMap::new(),
+        ))
+    }
+
+    fn plan_for(
+        &mut self,
+        query: &str,
+        output: PlanOutput<'_>,
+        pin: &[NodeIdx],
+        force_level: &HashMap<NodeIdx, Level>,
+    ) -> ActiveContext {
         self.graph.drain_pending(32);
         let ctx = PlanCtx {
             raw: &self.raw,
@@ -342,23 +430,23 @@ impl Dcr {
             evidence_by_span: &self.indexer.evidence_by_span,
             last_assembly: &self.last_assembly,
         };
-        let context = self.planner.plan(
-            &ctx,
-            Some(&mut self.speculator),
-            query,
-            budget.or(Some(self.budget)),
-            pin,
-            force_level,
-        );
+        let is_turn = matches!(output, PlanOutput::Context(_));
+        let speculator = is_turn.then_some(&mut self.speculator);
+        let context = self
+            .planner
+            .plan_for(&ctx, speculator, query, output, pin, force_level);
+        if !is_turn {
+            return context;
+        }
         self.planning += context.profile;
         self.plans += 1;
         // The source of truth for next turn's retention bonus and the
         // membership diff. Updated per plan, not per turn: an escalation's
         // re-plan is also a minimal-edit problem.
         self.last_assembly = context
-            .node_ids()
+            .entries
             .iter()
-            .map(|id| id.to_string())
+            .map(|entry| entry.node_id.clone())
             .collect();
         context
     }
@@ -388,16 +476,20 @@ impl Dcr {
         budget: Option<usize>,
         reasoner: &mut dyn Reasoner,
     ) -> Answer {
-        self.ask_with_consolidation(query, budget, reasoner, &mut |_| {})
+        let budget = budget.unwrap_or(self.budget);
+        if self.fit_gate && reasoner.accepts_raw_history() {
+            if let Some((prompt, tokens)) = self.fit_prompt(query, budget) {
+                return self.ask_bypass(query, budget, reasoner, prompt, tokens);
+            }
+        }
+        self.ask_with_consolidation(query, Some(budget), reasoner, &mut |_| {})
     }
 
     /// `ask`, with a hook that runs after the model returns and before the
     /// consistency check.
     ///
-    /// This is where Solution B's background consolidation lands in a real
-    /// deployment: it runs while Solution A is thinking, and it may invalidate
-    /// a fact A is mid-way through reasoning over. Passing it explicitly keeps
-    /// that race testable instead of hypothetical.
+    /// This path records a working set so it can check for invalidations after
+    /// running the consolidation hook.
     pub fn ask_with_consolidation(
         &mut self,
         query: &str,
@@ -406,16 +498,6 @@ impl Dcr {
         consolidate: &mut dyn FnMut(&mut MemoryGraph),
     ) -> Answer {
         let budget = budget.unwrap_or(self.budget);
-        // The gate must certify the prompt that will actually be sent, not
-        // just the history: the bypass adds a header, a QUESTION wrapper and
-        // the query itself on top of the raw documents.
-        let overhead = self.ladder.estimator.count(query) + FIT_PROMPT_OVERHEAD;
-        if self.fit_gate
-            && crate::fit::assess(&self.graph, self.telemetry.history_tokens + overhead, budget)
-                == crate::fit::Fit::Bypass
-        {
-            return self.ask_bypass(query, budget, reasoner);
-        }
         let mut force: HashMap<NodeIdx, Level> = HashMap::new();
         let mut pin: Vec<NodeIdx> = Vec::new();
         let mut escalations = 0u32;
@@ -426,55 +508,97 @@ impl Dcr {
         let mut escalation_refused = false;
         let mut replanned = false;
         let mut consistency_retries = 0u32;
-        // Append-only re-plan state. `previous_prompt` is the prompt the
-        // reasoner actually saw last iteration; `None` means "no reusable
-        // prefix" (first iteration, or the previous prompt contained
-        // falsified material).
-        let mut previous_prompt: Option<String> = None;
+        struct PendingEscalation {
+            node: NodeIdx,
+            prompt: String,
+            context: ActiveContext,
+            fallback: Option<String>,
+        }
+        let mut pending: Option<PendingEscalation> = None;
+        let mut sent_lines = HashSet::new();
+        let mut prompt_tokens = 0usize;
         let mut first_prompt: Option<String> = None;
         let mut last_prompt: String;
-        let mut escalated_prompt: bool;
+        let mut escalated_prompt = false;
 
         let (text, context) = loop {
             let context = self.plan_with(query, Some(budget), &pin, &force);
-            // The re-planned prompt is the previous prompt plus an
-            // `## ESCALATED` block holding only the material that changed:
-            // the reasoner sees a byte-identical prefix, so a downstream
-            // prompt cache reuses everything it already computed. An
-            // escalation can also promote a node that was present at a lower
-            // level to L0 — same id, richer text — so the delta compares
-            // rendered lines, not node ids. A consistency violation takes the
-            // full re-render instead: its prefix contains falsified
-            // material and must not be reused.
-            let (prompt, appended) = match &previous_prompt {
-                Some(prev) => {
-                    let mut delta: Vec<&str> = context
+            let mut extension = None;
+            if let Some(previous) = pending.take() {
+                if !context
+                    .entries
+                    .iter()
+                    .any(|entry| entry.node == previous.node && entry.level == Level::L0)
+                {
+                    // An attempted promotion can displace other evidence even
+                    // when L0 is too expensive. Keep the working set sent to
+                    // the reasoner and surface a failed explicit request.
+                    self.last_assembly = previous
+                        .context
                         .entries
                         .iter()
-                        .map(|e| e.rendered.as_str())
-                        .filter(|line| !prev.contains(line))
+                        .map(|entry| entry.node_id.clone())
                         .collect();
-                    if delta.is_empty() {
-                        (prev.clone(), false)
-                    } else {
-                        delta.sort_unstable();
-                        (
-                            format!(
-                                "{}\n\n## ESCALATED\n{}",
-                                prev.trim_end(),
-                                delta.join("\n")
-                            ),
-                            true,
-                        )
+                    escalation_refused = previous.fallback.is_none();
+                    if escalation_refused {
+                        self.audit_log.log(
+                            "runtime",
+                            "escalate",
+                            "context",
+                            &self.graph.node(previous.node).id,
+                            false,
+                            "raw evidence did not fit",
+                        );
+                    }
+                    last_prompt = previous.prompt;
+                    break (
+                        previous
+                            .fallback
+                            .unwrap_or_else(|| UNSERVED_ESCALATION.to_string()),
+                        previous.context,
+                    );
+                }
+                // Only keep the prefix if all its nodes survived the replan.
+                // Count earlier representations alongside the new versions.
+                if previous.context.entries.iter().all(|entry| {
+                    context.entries.iter().any(|next| {
+                        entry.node == next.node
+                            && (entry.rendered == next.rendered
+                                || entry.level.cheaper_than(next.level))
+                    })
+                }) {
+                    let mut delta: Vec<_> = context
+                        .entries
+                        .iter()
+                        .filter(|e| !sent_lines.contains(&e.rendered))
+                        .collect();
+                    let delta_tokens = delta
+                        .iter()
+                        .map(|entry| entry.cost)
+                        .fold(0, usize::saturating_add);
+                    if delta_tokens <= budget - prompt_tokens {
+                        delta.sort_unstable_by(|a, b| a.rendered.cmp(&b.rendered));
+                        prompt_tokens += delta_tokens;
+                        sent_lines.extend(delta.iter().map(|entry| entry.rendered.clone()));
+                        let mut prompt = previous.prompt;
+                        prompt.push_str("\n## ESCALATED\n");
+                        let blocks: Vec<_> =
+                            delta.iter().map(|entry| entry.rendered.as_str()).collect();
+                        prompt.push_str(&blocks.join("\n"));
+                        extension = Some(prompt);
                     }
                 }
-                None => (self.prompt_for(&context), false),
-            };
+            }
+            escalated_prompt = extension.is_some();
+            let prompt = extension.unwrap_or_else(|| {
+                prompt_tokens = context.tokens;
+                sent_lines.clear();
+                self.prompt_for(&context)
+            });
             if first_prompt.is_none() {
                 first_prompt = Some(prompt.clone());
             }
             last_prompt = prompt.clone();
-            escalated_prompt = appended;
             let text = reasoner.complete(&prompt, REASONER_SYSTEM);
             consolidate(&mut self.graph);
 
@@ -489,7 +613,6 @@ impl Dcr {
                 // the retry re-renders from scratch, and the discard is
                 // recorded rather than fictionalized as a "clear".
                 self.rollback.discard_working_set("workspace");
-                previous_prompt = None;
                 consistency_retries += 1;
                 replanned = true;
                 continue;
@@ -498,31 +621,54 @@ impl Dcr {
             // index directly. Both land in the same force/pin/re-plan step, so
             // the mechanism being exercised is identical either way and the
             // ablation rows are comparable.
-            let requested: Option<NodeIdx> = match parse_escalation(&text) {
-                Some(node_id) => self.graph.idx_of(&node_id),
+            let request = parse_escalation(&text);
+            let requested: Option<NodeIdx> = match &request {
+                Some(node_id) => self.graph.idx_of(node_id),
                 None if self.auto_escalate => {
-                    self.policy.needs_escalation(query, &context, &auto_escalated)
+                    self.policy
+                        .needs_escalation(query, &context, &auto_escalated)
                 }
                 None => None,
             };
             if let Some(idx) = requested {
-                if escalations < self.max_escalations {
+                if escalations < self.max_escalations
+                    && !auto_escalated.contains(&idx)
+                    && context
+                        .entries
+                        .iter()
+                        .any(|entry| entry.node == idx && entry.level != Level::L0)
+                    && self
+                        .ladder
+                        .available(&self.raw, self.graph.node(idx))
+                        .contains(&Level::L0)
+                {
                     escalations += 1;
                     auto_escalated.insert(idx);
                     force.insert(idx, Level::L0);
                     if !pin.contains(&idx) {
                         pin.push(idx);
                     }
-                    // The prompt just sent was not falsified — the violation
-                    // check above passed — so the retry may append to it.
-                    previous_prompt = Some(prompt);
+                    sent_lines.extend(context.entries.iter().map(|entry| entry.rendered.clone()));
+                    pending = Some(PendingEscalation {
+                        node: idx,
+                        prompt,
+                        context,
+                        fallback: request.is_none().then_some(text),
+                    });
                     continue;
                 }
             }
             // An escalation the runtime cannot serve must not be returned as
             // the answer.
-            if parse_escalation(&text).is_some() {
-                self.audit_log.log("runtime", "escalate", "context", &text, false, "budget exhausted");
+            if request.is_some() {
+                self.audit_log.log(
+                    "runtime",
+                    "escalate",
+                    "context",
+                    &text,
+                    false,
+                    "budget exhausted",
+                );
                 escalation_refused = true;
                 break (UNSERVED_ESCALATION.to_string(), context);
             }
@@ -554,7 +700,7 @@ impl Dcr {
         self.telemetry.record_turn(Turn {
             query: query.to_string(),
             qtype: context.qtype.unwrap_or(crate::policy::QueryType::Open),
-            tokens: context.tokens,
+            tokens: prompt_tokens,
             budget: context.budget,
             admitted: context.entries.len(),
             considered: context.considered,
@@ -589,7 +735,7 @@ impl Dcr {
         };
 
         Answer {
-            tokens: context.tokens,
+            tokens: prompt_tokens,
             text,
             context,
             escalations,
@@ -650,25 +796,47 @@ impl Dcr {
         activated
     }
 
-    /// What the fit gate would decide for the current store at the current
-    /// budget — exposed so an operator can see whether DCR is paying rent
-    /// before turning the gate on.
+    /// Whether the current history and the prompt wrapper fit before adding a
+    /// question. Each question is checked against the budget when it arrives.
     pub fn fit(&self) -> crate::fit::Fit {
-        crate::fit::assess(&self.graph, self.telemetry.history_tokens, self.budget)
+        if self.fit_prompt("", self.budget).is_some() {
+            crate::fit::Fit::Bypass
+        } else {
+            crate::fit::Fit::Plan
+        }
     }
 
-    /// The bypass turn: complete raw history, no indexing, no knapsack.
-    /// Reached only when the gate is on and the whole store fits in the
-    /// window — planning could only remove what the budget can hold.
-    fn ask_bypass(&mut self, query: &str, budget: usize, reasoner: &mut dyn Reasoner) -> Answer {
-        let mut prompt = String::from("# HISTORY (complete — the store fits in the window)\n");
+    fn fit_prompt(&self, query: &str, budget: usize) -> Option<(String, usize)> {
+        // This lower bound avoids copying long histories under the default
+        // estimator. A custom tokenizer prices the completed prompt directly.
+        if matches!(self.ladder.estimator, Estimator::Heuristic)
+            && self.raw.total_chars().saturating_add(query.len())
+                > budget.saturating_mul(crate::tokens::CHARS_PER_TOKEN)
+        {
+            return None;
+        }
+        if !crate::fit::can_bypass(&self.graph) {
+            return None;
+        }
+        let mut prompt = String::from("# HISTORY\n");
         for doc in self.raw.documents() {
             prompt.push_str(&doc.text);
             prompt.push('\n');
         }
         prompt.push_str(&format!("\nQUESTION: {query}\n"));
-        let text = reasoner.complete(&prompt, REASONER_SYSTEM);
         let tokens = self.ladder.estimator.count(&prompt);
+        (tokens <= budget).then_some((prompt, tokens))
+    }
+
+    fn ask_bypass(
+        &mut self,
+        query: &str,
+        budget: usize,
+        reasoner: &mut dyn Reasoner,
+        prompt: String,
+        tokens: usize,
+    ) -> Answer {
+        let text = reasoner.complete(&prompt, HISTORY_SYSTEM);
         let qtype = self.policy.classify(query);
         // Keep the cross-turn state honest: the bypass is still a turn. The
         // prefix-reuse metric must see this prompt (otherwise it compares
@@ -730,7 +898,7 @@ impl Dcr {
             // in exactly such an unshown span, so coverage counts L0 alone. A
             // node cheap enough to admit at L0 has few spans, so this does not
             // undercount by symmetry.
-            if entry.level != Level::L0 {
+            if entry.level != Level::L0 || context.l0_excerpts.contains(&entry.node) {
                 continue;
             }
             for span in &self.graph.node(entry.node).source_spans {
@@ -928,6 +1096,15 @@ impl Dcr {
 
     // -- audit -------------------------------------------------------------
     pub fn explain(&mut self, node_id: &str) -> Result<String, DcrError> {
+        if let Some(span) = self.raw.span_by_id(node_id) {
+            return Ok(format!(
+                "explain({node_id})  complete=true\n  source {} [{}..{}]\n{}",
+                span.doc_id,
+                span.start,
+                span.end,
+                self.raw.text_of(node_id),
+            ));
+        }
         let idx = self
             .graph
             .idx_of(node_id)
@@ -1153,9 +1330,7 @@ impl Dcr {
     ) -> Result<Checkpoint, DcrError> {
         let mut store = match ContextStore::open(dir) {
             Ok(store) => store,
-            Err(ContextError::Io(_)) => {
-                ContextStore::create(dir, "dcr").map_err(context_err)?
-            }
+            Err(ContextError::Io(_)) => ContextStore::create(dir, "dcr").map_err(context_err)?,
             Err(e) => return Err(context_err(e)),
         };
 
@@ -1220,8 +1395,7 @@ impl Dcr {
                     ("l0_yield", Json::num(node.meta.l0_yield.get() as f64)),
                 ]),
             ));
-            let mut record =
-                ObjectRecord::new(ObjectKind::Node, &node.id, node_object(node));
+            let mut record = ObjectRecord::new(ObjectKind::Node, &node.id, node_object(node));
             // A node grounded only in other nodes still has provenance; it is
             // the ungrounded one the store must refuse.
             if !sources.is_empty() || !node.dependencies.is_empty() {
@@ -1264,9 +1438,7 @@ impl Dcr {
                 .map_err(context_err)?;
         }
 
-        store
-            .commit(self.clock.now(), signer)
-            .map_err(context_err)
+        store.commit(self.clock.now(), signer).map_err(context_err)
     }
 
     /// Open a `.context` container.
@@ -1298,7 +1470,10 @@ impl Dcr {
                         .unwrap_or_default()
                         .to_string(),
                     ts: body.get("ts").and_then(Json::as_u64).unwrap_or(0),
-                    source: body.get("source").and_then(Json::as_str).map(str::to_string),
+                    source: body
+                        .get("source")
+                        .and_then(Json::as_str)
+                        .map(str::to_string),
                 }),
                 ObjectKind::Span => spans.push(Span {
                     id: record.logical_id.clone(),
@@ -1373,13 +1548,7 @@ impl Dcr {
             ),
         );
 
-        for idx in 0..runtime.raw.len() {
-            let text = runtime.raw.text_of(&runtime.raw.span(idx).id).to_string();
-            runtime.index.add_span(idx, &text);
-        }
-        for idx in 0..runtime.graph.len() {
-            runtime.reindex(idx);
-        }
+        runtime.rebuild_retrieval_indexes();
         Ok(runtime)
     }
 
@@ -1473,30 +1642,34 @@ impl Dcr {
             runtime.speculator.predictor.updates =
                 predictor.get("updates").and_then(Json::as_u64).unwrap_or(0) as u32;
         }
-        runtime.telemetry.history_tokens = data
-            .get("history_tokens")
-            .and_then(Json::as_usize)
-            .unwrap_or(0);
-        if let Some(Json::Obj(pairs)) = data.get("evidence_by_span") {
-            for (span_id, node_id) in pairs {
-                if let Some(id) = node_id.as_str() {
-                    runtime
-                        .indexer
+        runtime.rebuild_retrieval_indexes();
+        Ok(runtime)
+    }
+
+    fn rebuild_retrieval_indexes(&mut self) {
+        self.telemetry.history_tokens = self
+            .raw
+            .documents()
+            .iter()
+            .map(|doc| self.ladder.estimator.count(&doc.text))
+            .fold(0, usize::saturating_add);
+        for idx in 0..self.raw.len() {
+            let text = self.raw.text_of(&self.raw.span(idx).id);
+            self.index.add_span(idx, text);
+        }
+        for idx in 0..self.graph.len() {
+            let node = self.graph.node(idx);
+            if node.kind == Kind::Evidence {
+                for span_id in &node.source_spans {
+                    self.indexer
                         .evidence_by_span
-                        .insert(span_id.clone(), id.to_string());
+                        .insert(span_id.clone(), node.id.clone());
                 }
             }
+            if node.status != Status::Superseded {
+                self.reindex(idx);
+            }
         }
-
-        // Rebuild the retrieval index from state — it is derived, not source.
-        for idx in 0..runtime.raw.len() {
-            let text = runtime.raw.text_of(&runtime.raw.span(idx).id).to_string();
-            runtime.index.add_span(idx, &text);
-        }
-        for idx in 0..runtime.graph.len() {
-            runtime.reindex(idx);
-        }
-        Ok(runtime)
     }
 }
 
@@ -1537,7 +1710,7 @@ pub struct RebuildReport {
     pub rebuilt_l1: usize,
     pub rebuilt_l2: usize,
     pub rebuilt_l3: usize,
-    pub tokens: usize,  // audit-allow: LM token count, not a credential
+    pub tokens: usize, // audit-allow: LM token count, not a credential
     pub nodes: usize,
 }
 
@@ -1716,7 +1889,9 @@ fn node_from_json(data: &Json) -> Node {
         // Load-bearing for skill nodes: it is the artifact reference, i.e.
         // their grounding. Persisted since skills were introduced; older
         // stores simply have none.
-        source: get_meta("source").and_then(Json::as_str).map(str::to_string),
+        source: get_meta("source")
+            .and_then(Json::as_str)
+            .map(str::to_string),
     };
     Node {
         id: data

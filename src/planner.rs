@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use crate::budget::{Candidate, Choice, solve};
 use crate::graph::MemoryGraph;
 use crate::index::{HybridIndex, Namespace};
-use crate::ladder::{Ladder, Level};
+use crate::ladder::{EvidenceBudget, EvidenceExcerpt, Ladder, Level};
 use crate::nodes::{EdgeType, Kind, Node, NodeIdx, Status};
 use crate::policy::{DecisionPolicy, QueryType};
 use crate::spans::RawStore;
@@ -117,6 +117,14 @@ fn level_fit(qtype: QueryType, level: Level) -> f32 {
         (QueryType::Open, L1) => 0.85,
         (QueryType::Open, L2) => 1.0,
         (QueryType::Open, L3) => 0.8,
+    }
+}
+
+fn merge_seed(seeds: &mut Vec<(NodeIdx, f32)>, idx: NodeIdx, score: f32) {
+    if let Some((_, existing)) = seeds.iter_mut().find(|(node, _)| *node == idx) {
+        *existing = existing.max(score);
+    } else {
+        seeds.push((idx, score));
     }
 }
 
@@ -378,7 +386,7 @@ pub struct ActiveContext {
     pub qtype: Option<QueryType>,
     pub budget: usize,
     pub entries: Vec<Admission>,
-    pub tokens: usize,  // audit-allow: LM token count, not a credential
+    pub tokens: usize, // audit-allow: LM token count, not a credential
     pub seeds: Vec<NodeIdx>,
     pub dropped: Vec<NodeIdx>,
     pub demoted: Vec<(NodeIdx, Level, Level)>,
@@ -387,6 +395,8 @@ pub struct ActiveContext {
     pub snapshot_version: u64,
     pub explain_paths: Vec<(NodeIdx, Vec<NodeIdx>)>,
     pub stale_seen: Vec<NodeIdx>,
+    /// Nodes shown as verbatim excerpts of their L0 spans.
+    pub l0_excerpts: HashSet<NodeIdx>,
     pub overflow: bool,
     /// Per-stage clocks and rejection counts. See [`StageProfile`].
     pub profile: StageProfile,
@@ -569,6 +579,11 @@ pub struct PlanCtx<'a> {
     pub last_assembly: &'a HashSet<String>,
 }
 
+pub(crate) enum PlanOutput<'a> {
+    Context(usize),
+    Evidence(EvidenceBudget, &'a crate::semantic::Matches),
+}
+
 #[derive(Debug, Clone)]
 pub struct RelevancePlanner {
     pub weights: Weights,
@@ -665,9 +680,17 @@ impl RelevancePlanner {
         let text = format!(
             "w:{:?}|floor:{}|depth:{}|fanout:{}|cands:{}|decay:{}|stale:{}|reapr:{}|reafloor:{}",
             [
-                w.similarity, w.proximity, w.explain_path, w.confidence,
-                w.read_through, w.recency, w.stale_penalty, w.superseded_source,
-                w.contradiction_bonus, w.stickiness, w.decay,
+                w.similarity,
+                w.proximity,
+                w.explain_path,
+                w.confidence,
+                w.read_through,
+                w.recency,
+                w.stale_penalty,
+                w.superseded_source,
+                w.contradiction_bonus,
+                w.stickiness,
+                w.decay,
             ],
             self.seed_min_ratio,
             self.max_depth,
@@ -690,10 +713,37 @@ impl RelevancePlanner {
         pin: &[NodeIdx],
         force_level: &HashMap<NodeIdx, Level>,
     ) -> ActiveContext {
+        self.plan_for(
+            ctx,
+            speculator,
+            query,
+            PlanOutput::Context(budget.unwrap_or(self.budget)),
+            pin,
+            force_level,
+        )
+    }
+
+    pub(crate) fn plan_for(
+        &self,
+        ctx: &PlanCtx<'_>,
+        speculator: Option<&mut Speculator>,
+        query: &str,
+        output: PlanOutput<'_>,
+        pin: &[NodeIdx],
+        force_level: &HashMap<NodeIdx, Level>,
+    ) -> ActiveContext {
         // Independent of every per-stage clock below, so that
         // `profile.residual()` can detect a stage nobody timed.
         let whole_call = Instant::now();
-        let budget = budget.unwrap_or(self.budget);
+        let (budget, encoded_bytes, semantic) = match output {
+            PlanOutput::Context(budget) => (budget, None, None),
+            PlanOutput::Evidence(budget, matches) => {
+                (budget.tokens, budget.encoded_bytes, Some(matches))
+            }
+        };
+        let compact = semantic.is_some();
+        let learned = semantic.is_some_and(|matches| !matches.is_empty());
+        let answer_checked = semantic.is_some_and(|matches| matches.answer_checked);
         let qtype = ctx.policy.classify(query);
         let mut active = ActiveContext {
             query: query.to_string(),
@@ -703,10 +753,14 @@ impl RelevancePlanner {
             ..Default::default()
         };
 
-        let query_vec = ctx.ladder.query_vector(query);
+        let query_vec = if learned {
+            Vec::new()
+        } else {
+            ctx.ladder.query_vector(query)
+        };
 
         let clock = Instant::now();
-        let seeds = self.seed(ctx, query, &query_vec, &mut active);
+        let seeds = self.seed(ctx, query, &query_vec, &mut active, semantic);
         active.profile.seed_time = clock.elapsed();
         active.profile.seeds_kept = seeds.len();
 
@@ -725,11 +779,15 @@ impl RelevancePlanner {
         active.profile.score_dropped_cap = distances.len().saturating_sub(self.max_candidates);
         let mut candidates: Vec<Candidate> = Vec::new();
         let mut preferred: HashMap<NodeIdx, Level> = HashMap::new();
-        let mut scratch: HashMap<NodeIdx, (UtilityTerms, Level)> = HashMap::new();
+        let mut terms_by_node: HashMap<NodeIdx, UtilityTerms> = HashMap::new();
+        let mut rendered_overrides = HashMap::new();
 
         for &(idx, distance) in distances.iter().take(self.max_candidates) {
             active.profile.score_considered += 1;
             let node = ctx.graph.node(idx);
+            if answer_checked && !seed_scores.contains_key(&idx) && !pinned.contains(&idx) {
+                continue;
+            }
             active.profile.score_spans_priced += node.source_spans.len();
             if node.status == Status::Superseded {
                 active.profile.score_dropped_superseded += 1;
@@ -738,6 +796,9 @@ impl RelevancePlanner {
             if node.status == Status::Stale && !pinned.contains(&idx) && !self.admit_stale {
                 active.profile.score_dropped_stale += 1;
                 active.stale_seen.push(idx);
+                continue;
+            }
+            if compact && node.kind == Kind::Skill {
                 continue;
             }
             let available = ctx.ladder.available(ctx.raw, node);
@@ -770,7 +831,34 @@ impl RelevancePlanner {
                     &active,
                 )
             };
-            let base = terms.base().max(0.01);
+            // For learned retrieval, content match dominates state priors.
+            // A cached fact's generic utility must not outrank closer evidence.
+            let base = if learned {
+                terms.similarity + 0.1 * (terms.base() - terms.similarity)
+            } else {
+                terms.base()
+            }
+            .max(0.01);
+            let is_pinned = pinned.contains(&idx);
+            let excerpts = semantic
+                .into_iter()
+                .flat_map(|matches| &matches.spans)
+                .filter_map(|passage| {
+                    let id = &ctx.raw.span(passage.span).id;
+                    if node.source_spans.contains(id) {
+                        ctx.raw
+                            .text_of(id)
+                            .get(passage.range.clone())
+                            .map(|text| EvidenceExcerpt {
+                                text,
+                                focus: passage.focus.clone(),
+                            })
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            let checked_passage = excerpts.iter().any(|excerpt| excerpt.focus.is_some());
             let mut options: Vec<Choice> = Vec::new();
             for level in &available {
                 if let Some(forced) = forced {
@@ -778,18 +866,40 @@ impl RelevancePlanner {
                         continue;
                     }
                 }
-                options.push(Choice::new(
-                    *level,
-                    ctx.ladder.cost(ctx.raw, node, *level),
-                    base * level_fit(qtype, *level),
-                ));
+                let cost = if compact {
+                    if *level != Level::L0
+                        && (checked_passage || (qtype == QueryType::QuoteExact && !is_pinned))
+                    {
+                        continue;
+                    }
+                    let Some((text, cost)) = ctx.ladder.render_evidence(
+                        ctx.raw,
+                        node,
+                        *level,
+                        query,
+                        EvidenceBudget {
+                            tokens: budget,
+                            encoded_bytes,
+                        },
+                        &excerpts,
+                    ) else {
+                        continue;
+                    };
+                    rendered_overrides.insert((idx, *level), text);
+                    cost
+                } else {
+                    ctx.ladder.cost(ctx.raw, node, *level)
+                };
+                options.push(Choice::new(*level, cost, base * level_fit(qtype, *level)));
             }
             if options.is_empty() {
                 active.profile.score_dropped_no_level += 1;
-                continue;
+                if !is_pinned {
+                    continue;
+                }
             }
-            candidates.push(Candidate::new(idx, options, pinned.contains(&idx)));
-            scratch.insert(idx, (terms, want));
+            candidates.push(Candidate::new(idx, options, is_pinned));
+            terms_by_node.insert(idx, terms);
         }
 
         active.profile.score_time = clock.elapsed();
@@ -797,7 +907,41 @@ impl RelevancePlanner {
         active.considered = candidates.len();
         active.profile.knapsack_candidates = candidates.len();
         let clock = Instant::now();
-        let allocation = solve(&candidates, budget, None, &preferred);
+        let line_bytes = |node, level| {
+            crate::json::evidence_line_bytes(rendered_overrides[&(node, level)].trim())
+        };
+        // A byte allocation satisfies both limits when every option uses at
+        // least as much of the byte allowance as of the token allowance.
+        let byte_budget = encoded_bytes.filter(|&bytes| {
+            candidates.iter().all(|candidate| {
+                candidate.options.iter().all(|option| {
+                    bytes as u128 * option.cost as u128
+                        <= budget as u128 * line_bytes(candidate.node, option.level) as u128
+                })
+            })
+        });
+        if byte_budget.is_some() {
+            for candidate in &mut candidates {
+                for option in &mut candidate.options {
+                    option.cost = line_bytes(candidate.node, option.level);
+                }
+            }
+        }
+        let capacity = byte_budget.unwrap_or(budget);
+        if learned {
+            Self::reserve_best_match(&mut candidates, &seed_scores, capacity);
+        }
+        if !compact && !force_level.is_empty() {
+            Self::fit_escalations(
+                ctx,
+                query,
+                budget,
+                force_level,
+                &mut candidates,
+                &mut rendered_overrides,
+            );
+        }
+        let allocation = solve(&candidates, capacity, None, &preferred);
         active.profile.knapsack_time = clock.elapsed();
 
         let clock = Instant::now();
@@ -805,14 +949,29 @@ impl RelevancePlanner {
         chosen.sort_by_key(|(idx, _)| *idx);
         for (idx, option) in chosen {
             let node = ctx.graph.node(idx);
-            let (terms, _) = scratch[&idx];
-            let rendered = ctx.ladder.render(ctx.raw, node, option.level);
+            let terms = terms_by_node[&idx];
+            let rendered = match rendered_overrides.remove(&(idx, option.level)) {
+                Some(text) => {
+                    if !compact {
+                        active.l0_excerpts.insert(idx);
+                    }
+                    text
+                }
+                None => ctx.ladder.render(ctx.raw, node, option.level),
+            };
             let decision =
                 ctx.policy
                     .decide(node, qtype, &ctx.ladder.available(ctx.raw, node), true);
-            node.admits.set(node.admits.get() + 1);
-            if option.level == Level::L0 {
-                node.meta.l0_reads.set(node.meta.l0_reads.get() + 1);
+            let cost = if byte_budget.is_some() {
+                ctx.ladder.estimator.count(&rendered)
+            } else {
+                option.cost
+            };
+            if !compact {
+                node.admits.set(node.admits.get() + 1);
+                if option.level == Level::L0 {
+                    node.meta.l0_reads.set(node.meta.l0_reads.get() + 1);
+                }
             }
             active.entries.push(Admission {
                 node: idx,
@@ -820,7 +979,7 @@ impl RelevancePlanner {
                 kind: node.kind,
                 label: node.label(),
                 level: option.level,
-                cost: option.cost,
+                cost,
                 utility: option.utility,
                 reason: decision.reason,
                 pinned: pinned.contains(&idx),
@@ -831,7 +990,7 @@ impl RelevancePlanner {
         active.profile.admit_time = clock.elapsed();
         active.profile.admitted = active.entries.len();
 
-        active.tokens = allocation.tokens;
+        active.tokens = active.entries.iter().map(|entry| entry.cost).sum();
         active.dropped = allocation.dropped;
         active.demoted = allocation.demoted;
         active.overflow = allocation.overflow;
@@ -847,6 +1006,89 @@ impl RelevancePlanner {
         active
     }
 
+    fn fit_escalations(
+        ctx: &PlanCtx<'_>,
+        query: &str,
+        budget: usize,
+        force_level: &HashMap<NodeIdx, Level>,
+        candidates: &mut [Candidate],
+        rendered_overrides: &mut HashMap<(NodeIdx, Level), String>,
+    ) {
+        let requests_raw = |candidate: &Candidate| {
+            candidate.pinned
+                && force_level.get(&candidate.node) == Some(&Level::L0)
+                && matches!(candidate.options.as_slice(), [option] if option.level == Level::L0)
+        };
+        let mut remaining = budget;
+        let mut raw_cost = 0usize;
+        for candidate in candidates.iter().filter(|candidate| candidate.pinned) {
+            if let Some(choice) = candidate.cheapest() {
+                if requests_raw(candidate) {
+                    raw_cost = raw_cost.saturating_add(choice.cost);
+                } else {
+                    remaining = remaining.saturating_sub(choice.cost);
+                }
+            }
+        }
+        if raw_cost <= remaining {
+            return;
+        }
+        // Keep the other mandatory entries and fit the requested raw detail
+        // with a whole sentence when full spans exceed the budget.
+        for candidate in candidates
+            .iter_mut()
+            .filter(|candidate| requests_raw(candidate))
+        {
+            let node = ctx.graph.node(candidate.node);
+            if let Some((text, cost)) = ctx.ladder.l0_excerpt(ctx.raw, node, query, remaining) {
+                let choice = &mut candidate.options[0];
+                if cost < choice.cost {
+                    choice.cost = cost;
+                    rendered_overrides.insert((candidate.node, Level::L0), text);
+                }
+            }
+        }
+    }
+
+    fn reserve_best_match(
+        candidates: &mut [Candidate],
+        seeds: &HashMap<NodeIdx, f32>,
+        budget: usize,
+    ) {
+        let mandatory = candidates
+            .iter()
+            .filter(|candidate| candidate.pinned)
+            .filter_map(Candidate::cheapest)
+            .map(|choice| choice.cost)
+            .fold(0, usize::saturating_add);
+        let remaining = budget.saturating_sub(mandatory);
+        // Keep room for the best fitting direct hit before packing lower
+        // scoring entries. Several cheap distractions can outbid one answer.
+        let best = candidates
+            .iter_mut()
+            .filter(|candidate| {
+                !candidate.pinned && seeds.get(&candidate.node).is_some_and(|score| *score > 0.0)
+            })
+            .filter_map(|candidate| {
+                let utility = candidate
+                    .options
+                    .iter()
+                    .filter(|option| option.cost <= remaining)
+                    .map(|option| option.utility)
+                    .max_by(f32::total_cmp)?;
+                let relevance = seeds.get(&candidate.node).copied()?;
+                Some((candidate, relevance, utility))
+            })
+            .max_by(|a, b| {
+                a.1.total_cmp(&b.1)
+                    .then(a.2.total_cmp(&b.2))
+                    .then(b.0.node.cmp(&a.0.node))
+            });
+        if let Some((candidate, _, _)) = best {
+            candidate.pinned = true;
+        }
+    }
+
     // -- steps -------------------------------------------------------------
     fn seed(
         &self,
@@ -854,16 +1096,44 @@ impl RelevancePlanner {
         query: &str,
         query_vec: &[f32],
         active: &mut ActiveContext,
+        semantic: Option<&crate::semantic::Matches>,
     ) -> Vec<(NodeIdx, f32)> {
-        let mut hits = ctx
-            .index
-            .search(Namespace::Node, query, query_vec, self.seed_k);
+        // The compact path starts with lexical and learned matches. Hashing
+        // vectors alone do not seed evidence.
+        let compact = semantic.is_some();
+        let answer_checked = semantic.is_some_and(|matches| matches.answer_checked);
+        let search = |namespace| {
+            if compact {
+                ctx.index.lexical_matches(namespace, query, self.seed_k)
+            } else {
+                ctx.index.search(namespace, query, query_vec, self.seed_k)
+            }
+        };
+        let mut hits = if answer_checked {
+            Vec::new()
+        } else {
+            search(Namespace::Node)
+        };
         active.profile.seed_hits = hits.len();
         if let Some((_, top)) = hits.first().copied() {
             let floor = top * self.seed_min_ratio;
             let before = hits.len();
             hits.retain(|(_, score)| *score >= floor);
             active.profile.seed_dropped_floor = before - hits.len();
+        }
+        if let Some(matches) = semantic.filter(|m| !m.is_empty()) {
+            // BM25 normalizes its top hit to 1.0 even if it matches one word.
+            // Preserve exact matches without letting a single shared term
+            // outrank passages with stronger learned support.
+            for (idx, score) in &mut hits {
+                let node = ctx.graph.node(*idx);
+                let text = ctx.ladder.state_object(node);
+                *score *= crate::policy::overlap(query, &text).min(1.0);
+            }
+            for &(idx, similarity) in &matches.nodes {
+                merge_seed(&mut hits, idx, crate::semantic::relevance(similarity));
+            }
+            hits.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         }
         let mut seeds: Vec<(NodeIdx, f32)> = Vec::new();
         // Recency prefilter, off by default. Applied before scoring so it is a
@@ -878,8 +1148,8 @@ impl RelevancePlanner {
         } else {
             None
         };
-        let age_floor = age_span
-            .map(|(lo, hi)| lo + ((hi - lo) as f32 * self.recency_cutoff) as u64);
+        let age_floor =
+            age_span.map(|(lo, hi)| lo + ((hi - lo) as f32 * self.recency_cutoff) as u64);
         for (idx, score) in hits {
             let node = ctx.graph.node(idx);
             if let (Some(floor), Some((lo, hi))) = (age_floor, age_span) {
@@ -945,11 +1215,8 @@ impl RelevancePlanner {
         }
         // Fall back to the raw lexical index when state search finds nothing —
         // the material may be ingested but not yet extracted into state.
-        if seeds.len() < 2 {
-            for (span_idx, score) in
-                ctx.index
-                    .search(Namespace::Span, query, query_vec, self.seed_k)
-            {
+        if !answer_checked && (compact || seeds.len() < 2) {
+            for (span_idx, score) in search(Namespace::Span) {
                 let span_id = &ctx.raw.span(span_idx).id;
                 if let Some(evidence) = ctx
                     .evidence_by_span
@@ -958,8 +1225,29 @@ impl RelevancePlanner {
                 {
                     if !seeds.iter().any(|(i, _)| *i == evidence) {
                         active.profile.seed_from_spans += 1;
-                        seeds.push((evidence, score * 0.8));
+                        let coverage = if semantic.is_some_and(|m| !m.is_empty()) {
+                            crate::policy::overlap(query, ctx.raw.text_of(span_id)).min(1.0)
+                        } else {
+                            1.0
+                        };
+                        seeds.push((evidence, score * coverage * 0.8));
                     }
+                }
+            }
+        }
+        if let Some(matches) = semantic {
+            for passage in &matches.spans {
+                let span_id = &ctx.raw.span(passage.span).id;
+                if let Some(idx) = ctx
+                    .evidence_by_span
+                    .get(span_id)
+                    .and_then(|id| ctx.graph.idx_of(id))
+                {
+                    merge_seed(
+                        &mut seeds,
+                        idx,
+                        crate::semantic::relevance(passage.similarity),
+                    );
                 }
             }
         }
@@ -994,9 +1282,8 @@ impl RelevancePlanner {
         // in through the second door on an adversarial corpus where the
         // superseded sentence is the better lexical match for the query.
         let admit_stale = self.admit_stale;
-        let excluded = |idx: NodeIdx| -> bool {
-            !admit_stale && ctx.graph.node(idx).meta.superseded_source
-        };
+        let excluded =
+            |idx: NodeIdx| -> bool { !admit_stale && ctx.graph.node(idx).meta.superseded_source };
         let push = |distances: &mut Vec<(NodeIdx, usize)>,
                     seen: &mut HashMap<NodeIdx, usize>,
                     idx: NodeIdx,

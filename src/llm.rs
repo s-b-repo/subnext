@@ -46,6 +46,11 @@ Rules:
 
 pub trait Reasoner: Send {
     fn complete(&mut self, prompt: &str, system: &str) -> String;
+
+    /// Whether the reasoner can answer directly from a raw history prompt.
+    fn accepts_raw_history(&self) -> bool {
+        true
+    }
 }
 
 /// `#ESCALATE <node_id>` anywhere in a reply.
@@ -146,6 +151,10 @@ impl LocalReasoner {
 }
 
 impl Reasoner for LocalReasoner {
+    fn accepts_raw_history(&self) -> bool {
+        false
+    }
+
     fn complete(&mut self, prompt: &str, _system: &str) -> String {
         let query = Self::query_of(prompt);
         if self.current_query.as_deref() != Some(query.as_str()) {

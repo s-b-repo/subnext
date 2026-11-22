@@ -82,9 +82,10 @@ cached prefixes, and that comparison has not been run.
 
 ### Short, single-turn work
 
-One document, one question, no corrections. The indexing, the graph and the
-knapsack are pure overhead. Use ordinary retrieval, or put the document in the
-prompt.
+A raw-text reasoner can answer directly from a short, unrevised history.
+Enable `--fit-gate` with `dcr ask --endpoint HOST:PORT` to skip planning when the
+rendered history and question fit. The runtime plans questions that need graph
+state, such as corrections, derivations, and skills.
 
 ### Tasks needing the full text verbatim
 
@@ -95,10 +96,8 @@ objective for you.
 
 ### Semantic search over paraphrase
 
-The bundled embedder is a 256-dimensional hashing embedding, not a learned one.
-It finds material sharing vocabulary. This entry used to add that the lexical
-and vector channels are "correlated rather than independent evidence", which was
-asserted and never measured. `bench --channels` measures it.
+The reference planner's 256-dimensional hashing embedder finds material that
+shares vocabulary. `bench --channels` compares that channel with lexical search.
 
 On the standard corpus, top-20 per channel over 298 nodes: the channels share
 **3.6 nodes per probe against 1.3 expected if independent** — 2.7x chance, so
@@ -113,21 +112,18 @@ negatively whatever order they are in, so the control is a pseudo-random draw of
 the same size from the same node population — same disjointness, not just the
 same length. Measured rho is -0.24 against a control of -0.80.
 
-**What none of this measures is paraphrase.** The standard seven probes were
-written to be answerable by vocabulary overlap, which is the condition under
-which these two channels most agree. A paraphrase probe set is the measurement
-this entry actually rests on and it does not exist yet, so the poor fit stands
-on the design of the embedder rather than on evidence.
+The compact `context-read` route uses a local semantic index and an extractive
+reader for factual questions. At a 24-token budget, `bench-semantic.py` ranked
+the correct evidence first for all 16 basic paraphrases and all 8 challenge
+paraphrases with close distractors. The lexical control recovered zero in
+both sets. Six unrelated questions and six related questions with missing
+answers returned empty working sets. The benchmark also checks a verbatim
+answer at the end of a long sentence under a 25-byte limit, source corrections,
+and index refresh after ingest.
+[Setup and benchmark](../README.md#learned-retrieval-for-compact-evidence)
 
-Swapping in a real embedding model is now a constructor argument rather than a
-patch. `Ladder::embedder` takes any `dyn Embedder` — see
-[`examples/custom_embedder.rs`](https://github.com/s-b-repo/subnext/blob/main/examples/custom_embedder.rs).
-The claim that "the interface accepts any `str -> Vec<f32>`" predated the
-interface; `Ladder` called the hashing embedder directly until now.
-
-Note what a learned embedder costs here: the runtime stops being offline and
-deterministic, and every figure in [RESULTS](../RESULTS.md) would need
-re-measuring against the new channel rather than inherited.
+Library callers can also supply a custom `Embedder` to the reference planner.
+[Custom embedder example](../examples/custom_embedder.rs)
 
 ### ~~Reasoners that cannot signal~~ — retracted
 

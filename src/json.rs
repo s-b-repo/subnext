@@ -16,6 +16,11 @@ pub enum Json {
     Obj(Vec<(String, Json)>),
 }
 
+/// Size of an evidence line written as a JSON string followed by a newline.
+pub fn evidence_line_bytes(text: &str) -> usize {
+    Json::str(text).to_json_string().len() + 1
+}
+
 impl Json {
     pub fn obj(pairs: Vec<(&str, Json)>) -> Json {
         Json::Obj(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())

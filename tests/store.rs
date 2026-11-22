@@ -275,6 +275,24 @@ fn pinned_candidates_are_admitted_first() {
 }
 
 #[test]
+fn pinned_upgrades_never_spend_an_unavailable_bucket() {
+    for (budget, upgrade_cost, quantum) in [(7, 8, None), (8, 9, Some(3))] {
+        let candidates = [Candidate::new(
+            0,
+            vec![
+                Choice::new(Level::L2, 7, 1.0),
+                Choice::new(Level::L0, upgrade_cost, 2.0),
+            ],
+            true,
+        )];
+        let allocation = solve(&candidates, budget, quantum, &HashMap::new());
+        assert_eq!(allocation.tokens, 7);
+        assert_eq!(allocation.chosen[&0].level, Level::L2);
+        assert!(!allocation.overflow);
+    }
+}
+
+#[test]
 fn overflow_is_reported_not_silently_exceeded() {
     let candidates = vec![Candidate::new(
         0,

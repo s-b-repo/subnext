@@ -20,6 +20,13 @@ This is a knapsack: each candidate memory object has a token cost (which depends
 [ladder level](representation-ladder.md) chosen for it) and an estimated utility. The runtime picks
 the best-value set that fits.
 
+The budget covers the text of the admitted memory entries. A model runner
+also needs room for its instructions, question, and answer. An escalation
+keeps the earlier prompt when its evidence and the new evidence fit together.
+Otherwise the runtime sends the rebuilt working set. If the requested raw span
+is too large, the runtime can use a verbatim sentence that fits alongside
+mandatory entries.
+
 ## Why this matters
 
 You stop instructing the system manually:

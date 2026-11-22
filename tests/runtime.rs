@@ -237,6 +237,63 @@ fn escalation_append_preserves_the_prompt_prefix() {
     );
 }
 
+#[test]
+fn escalation_keeps_the_evidence_actually_sent_within_budget() {
+    let source = "The inventory service was receiving traffic from the rerouted batch process. \
+                  The rollout moved through canary and 10 percent of the fleet, then readiness \
+                  probes began failing against the inventory host. The retry budget was exhausted \
+                  after 7 attempts and the final failure code was ERR_CONN_REFUSED_37.";
+    let one_sentence = source.replace(". The", "; the");
+    for (budget, source, can_promote) in [
+        (80, source, true),
+        (120, source, true),
+        (80, one_sentence.as_str(), false),
+    ] {
+        let mut rt = Dcr::new(budget);
+        rt.ingest("Goal: restore checkout by 09:00 UTC.", Some("goal"))
+            .unwrap();
+        rt.ingest(
+            "Constraint: never restart the payment service.",
+            Some("constraint"),
+        )
+        .unwrap();
+        rt.ingest(source, Some("log")).unwrap();
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let mut reasoner = RecordingReasoner {
+            inner: LocalReasoner::new(),
+            prompts: Arc::clone(&prompts),
+        };
+        let answer = rt.ask_with(
+            "how many retry attempts were made before the failure?",
+            None,
+            &mut reasoner,
+        );
+        let sent = prompts.lock().unwrap();
+        let costs: Vec<usize> = sent
+            .iter()
+            .map(|prompt| {
+                prompt
+                    .lines()
+                    .filter(|line| line.starts_with('['))
+                    .map(dcr::tokens::estimate_tokens)
+                    .sum()
+            })
+            .collect();
+        assert_eq!(answer.escalations, 1);
+        assert!(costs.iter().all(|&cost| cost <= budget), "{costs:?}");
+        assert_eq!(costs.last().copied(), Some(answer.tokens));
+        assert!(!answer.escalated_prompt);
+        if can_promote {
+            assert_eq!(sent.len(), 2);
+            assert!(!answer.context.l0_excerpts.is_empty());
+            assert!(!answer.escalation_refused);
+            assert!(answer.text.contains("7 attempts"));
+        } else {
+            assert_eq!(sent.len(), 1);
+            assert!(answer.escalation_refused);
+        }
+    }
+}
 
 #[test]
 fn reactivation_pruning_spares_the_hot_old_candidates() {

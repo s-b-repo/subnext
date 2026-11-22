@@ -13,19 +13,20 @@
 //! Globs are left to the shell, which already does them better than a
 //! hand-rolled matcher would.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use dcr::bench::{
-    run_ablation, run_baselines, run_benchmark, run_consolidation, run_coverage, run_decay, run_multi_hop, run_channels, run_mutation_probe, run_stages,
-    run_cache_layout, run_cache_instrument, run_fusion, run_recall, run_reactivation, run_scaling_diverse, run_subject_control,
-    run_poison,
-    run_rebuild, run_scaling, run_sweep, run_tamper,
+    run_ablation, run_baselines, run_benchmark, run_cache_instrument, run_cache_layout,
+    run_channels, run_consolidation, run_coverage, run_decay, run_fusion, run_multi_hop,
+    run_mutation_probe, run_poison, run_reactivation, run_rebuild, run_recall, run_scaling,
+    run_scaling_diverse, run_stages, run_subject_control, run_sweep, run_tamper,
 };
+use dcr::context_store::ContextStore;
 use dcr::demo::run_demo;
 use dcr::discover::{DiscoverOpts, run as run_discover};
 use dcr::graph::DcrError;
-use dcr::context_store::ContextStore;
 use dcr::runtime::Dcr;
 use dcr::scrub::{ScrubOptions, scrub};
 
@@ -39,6 +40,9 @@ commands:
   ingest <path>...            index files or directories into the memory runtime
   ask <query> [--show-context]  plan a working set and answer a question
   plan <query> [--explain]    show the active context without calling a model
+  context-read                read a question on stdin and return compact JSON evidence
+  semantic-index --semantic-model PATH
+                              build or refresh the local learned retrieval index
   skill add <name> <adapter> [description...]
                               register a capability (adapter = content hash/URI)
   skill list                  show registered skills
@@ -52,8 +56,8 @@ commands:
   checkpoint                  seal the current state as a new generation
   quarantine                  list objects that failed verification
   demo                        worked example through all four ladder levels
-  serve [--port N] [--sessions N]
-                              share sessions over TCP: ASK/INGEST, one runtime
+  serve --session-policy <path> [--stop-file <path>] [--port N] [--sessions N]
+                              share authenticated workspace sessions on loopback
                               per conversation (default port 7878, 256 sessions)
   bench [--turns N] [--window N]
                               DCR vs full context vs sliding window
@@ -91,6 +95,7 @@ options:
                               (peregrine-serve, vLLM) instead of the offline
                               line-matcher
   --model NAME                model field sent to --endpoint (default: peregrine)
+  --lexical-only              context-read: compare against lexical retrieval
   --character PATH            plan --identity-core: read live character.jsonl
   --fit-gate                  ask: when the whole store fits in the window, send
                               raw history instead of planning (needs a reasoner
@@ -109,9 +114,12 @@ struct Args {
     stickiness: Option<f32>,
     endpoint: Option<String>,
     model: Option<String>,
+    semantic_model: Option<PathBuf>,
     character: Option<PathBuf>,
     port: u16,
     sessions: usize,
+    session_policy: Option<PathBuf>,
+    stop_file: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -126,9 +134,12 @@ fn parse_args() -> Result<Args, String> {
     let mut stickiness: Option<f32> = None;
     let mut endpoint: Option<String> = None;
     let mut model: Option<String> = None;
+    let mut semantic_model = None;
     let mut character: Option<PathBuf> = None;
     let mut port: u16 = 7878;
     let mut sessions: usize = 256;
+    let mut session_policy = None;
+    let mut stop_file = None;
 
     let mut argv = std::env::args().skip(1);
     while let Some(arg) = argv.next() {
@@ -166,13 +177,17 @@ fn parse_args() -> Result<Args, String> {
                         .map_err(|_| "--stickiness must be a number")?,
                 )
             }
-            "--endpoint" => {
-                endpoint = Some(argv.next().ok_or("--endpoint needs host:port")?)
-            }
+            "--endpoint" => endpoint = Some(argv.next().ok_or("--endpoint needs host:port")?),
             "--model" => model = Some(argv.next().ok_or("--model needs a name")?),
+            "--semantic-model" => {
+                semantic_model = Some(PathBuf::from(
+                    argv.next().ok_or("--semantic-model needs a directory")?,
+                ));
+            }
             "--character" => {
                 character = Some(PathBuf::from(
-                    argv.next().ok_or("--character needs a path to character.jsonl")?,
+                    argv.next()
+                        .ok_or("--character needs a path to character.jsonl")?,
                 ))
             }
             "--port" => {
@@ -188,6 +203,16 @@ fn parse_args() -> Result<Args, String> {
                     .ok_or("--sessions needs a number")?
                     .parse()
                     .map_err(|_| "--sessions must be a number")?
+            }
+            "--session-policy" => {
+                session_policy = Some(PathBuf::from(
+                    argv.next().ok_or("--session-policy needs a path")?,
+                ));
+            }
+            "--stop-file" => {
+                stop_file = Some(PathBuf::from(
+                    argv.next().ok_or("--stop-file needs a path")?,
+                ));
             }
             "-h" | "--help" => return Err(USAGE.to_string()),
             flag if flag.starts_with("--") => flags.push(flag.to_string()),
@@ -210,9 +235,12 @@ fn parse_args() -> Result<Args, String> {
         stickiness,
         endpoint,
         model,
+        semantic_model,
         character,
         port,
         sessions,
+        session_policy,
+        stop_file,
     })
 }
 
@@ -345,6 +373,8 @@ fn run() -> Result<(), String> {
                 }
             }
             persist(&runtime, &args.store).map_err(to_err)?;
+            dcr::semantic::refresh(&runtime, &args.store)
+                .map_err(|error| format!("Memory saved. Semantic index refresh failed: {error}"))?;
             println!("\n{total} state nodes; store: {}", args.store.display());
         }
         "ask" => {
@@ -358,15 +388,10 @@ fn run() -> Result<(), String> {
             if let Some(endpoint) = &args.endpoint {
                 runtime.set_reasoner(Box::new(dcr::llm::HttpReasoner::new(
                     endpoint.clone(),
-                    args.model.clone().unwrap_or_else(|| "peregrine".to_string()),
+                    args.model
+                        .clone()
+                        .unwrap_or_else(|| "peregrine".to_string()),
                 )));
-            }
-            if runtime.fit_gate && args.endpoint.is_none() {
-                eprintln!(
-                    "warning: --fit-gate without --endpoint sends raw history to the offline \
-                     line-matcher, which cannot read it — answers will be empty. The gate is \
-                     meant for a real reasoner (--endpoint HOST:PORT)."
-                );
             }
             let answer = runtime.ask(query, None);
             println!("{}", answer.text);
@@ -392,6 +417,115 @@ fn run() -> Result<(), String> {
                 println!("\n{}", answer.context.render());
             }
             persist(&runtime, &args.store).map_err(to_err)?;
+        }
+        "context-read" => {
+            use dcr::json::Json;
+
+            if !args.positional.is_empty()
+                || args.flags.iter().any(|flag| flag != "--lexical-only")
+                || args.endpoint.is_some()
+                || args.semantic_model.is_some()
+                || !(1..=4096).contains(&args.budget)
+            {
+                return Err(
+                    "context-read needs a budget from 1 to 4096 and a query on stdin".into(),
+                );
+            }
+            if !args.store.is_file() && !container_exists(&args.store) {
+                return Err(format!("no context store at {}", args.store.display()));
+            }
+            let mut query = String::new();
+            std::io::stdin()
+                .take(16_385)
+                .read_to_string(&mut query)
+                .map_err(|e| format!("read context query: {e}"))?;
+            if query.trim().is_empty() || query.len() > 16_384 {
+                return Err("context query is empty or exceeds the byte budget".into());
+            }
+            let mut encoded_bytes = match std::env::var("DCR_EVIDENCE_BYTES") {
+                Ok(value) => Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| "DCR_EVIDENCE_BYTES must be a byte count")?,
+                ),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(error) => return Err(format!("invalid DCR_EVIDENCE_BYTES: {error}")),
+            };
+            let mut runtime = open(&args.store, args.budget).map_err(to_err)?;
+            let plan = if args.flags.iter().any(|flag| flag == "--lexical-only") {
+                runtime
+                    .plan_evidence_limited(&query, None, encoded_bytes)
+                    .map_err(to_err)?
+            } else {
+                dcr::semantic::plan(&mut runtime, &args.store, &query, encoded_bytes)?
+            };
+            let mut entries = plan.entries;
+            entries.sort_by(|a, b| {
+                b.terms
+                    .similarity
+                    .total_cmp(&a.terms.similarity)
+                    .then_with(|| b.utility.total_cmp(&a.utility))
+                    .then(a.node_id.cmp(&b.node_id))
+            });
+            let mut seen = std::collections::HashSet::new();
+            let hits = entries
+                .into_iter()
+                .filter(|entry| seen.insert(entry.rendered.clone()))
+                .filter(|entry| {
+                    let Some(remaining) = encoded_bytes.as_mut() else {
+                        return true;
+                    };
+                    let size = dcr::json::evidence_line_bytes(entry.rendered.trim());
+                    if size > *remaining {
+                        return false;
+                    }
+                    *remaining -= size;
+                    true
+                })
+                .take(8)
+                .map(|entry| {
+                    let score = if entry.utility.is_finite() {
+                        f64::from(entry.utility)
+                    } else {
+                        0.0
+                    };
+                    let path = if entry.kind == dcr::Kind::Evidence {
+                        runtime.graph.node(entry.node).source_spans.first().cloned()
+                    } else {
+                        None
+                    }
+                    .unwrap_or_else(|| entry.node_id.clone());
+                    Json::obj(vec![
+                        ("version", Json::num(1)),
+                        ("id", Json::str(entry.node_id)),
+                        ("text", Json::str(entry.rendered)),
+                        ("score", Json::num(score)),
+                        (
+                            "provenance",
+                            Json::obj(vec![
+                                ("source", Json::str("subnext")),
+                                ("path", Json::str(path)),
+                            ]),
+                        ),
+                    ])
+                })
+                .collect();
+            println!("{}", Json::Arr(hits).to_json_string());
+        }
+        "semantic-index" => {
+            if !args.store.is_file() && !container_exists(&args.store) {
+                return Err(format!("no context store at {}", args.store.display()));
+            }
+            let model = args
+                .semantic_model
+                .as_deref()
+                .ok_or("semantic-index needs --semantic-model PATH")?;
+            let runtime = open(&args.store, args.budget).map_err(to_err)?;
+            let (path, count) = dcr::semantic::build(&runtime, &args.store, model)?;
+            println!(
+                "Indexed {count} passages and state entries in {}",
+                path.display()
+            );
         }
         "plan" => {
             let query = args.positional.first().ok_or("plan needs a query")?;
@@ -428,7 +562,9 @@ fn run() -> Result<(), String> {
                         Some(words) if !words.is_empty() => words.join(" "),
                         _ => name.clone(),
                     };
-                    runtime.add_skill(name, &description, adapter).map_err(to_err)?;
+                    runtime
+                        .add_skill(name, &description, adapter)
+                        .map_err(to_err)?;
                     persist(&runtime, &args.store).map_err(to_err)?;
                     println!("skill {name} registered ({adapter})");
                 }
@@ -454,7 +590,7 @@ fn run() -> Result<(), String> {
                     return Err(
                         "usage: dcr skill add <name> <adapter> [description...] | dcr skill list"
                             .to_string(),
-                    )
+                    );
                 }
             }
         }
@@ -470,7 +606,11 @@ fn run() -> Result<(), String> {
         "discover" => {
             let runtime = open(&args.store, args.budget).map_err(to_err)?;
             let mut opts = DiscoverOpts::default();
-            if let Some(n) = args.positional.first().and_then(|x| x.parse::<usize>().ok()) {
+            if let Some(n) = args
+                .positional
+                .first()
+                .and_then(|x| x.parse::<usize>().ok())
+            {
                 opts.top = n;
             }
             if args.flags.iter().any(|f| f == "--same-source") {
@@ -480,12 +620,20 @@ fn run() -> Result<(), String> {
         }
         "importance" => {
             let runtime = open(&args.store, args.budget).map_err(to_err)?;
-            let top = args.positional.first().and_then(|x| x.parse::<usize>().ok()).unwrap_or(10);
+            let top = args
+                .positional
+                .first()
+                .and_then(|x| x.parse::<usize>().ok())
+                .unwrap_or(10);
             print!("{}", dcr::importance::run(runtime.graph.nodes(), top));
         }
         "ark" => {
             let runtime = open(&args.store, args.budget).map_err(to_err)?;
-            let top = args.positional.first().and_then(|x| x.parse::<usize>().ok()).unwrap_or(20);
+            let top = args
+                .positional
+                .first()
+                .and_then(|x| x.parse::<usize>().ok())
+                .unwrap_or(20);
             print!("{}", dcr::ark::run(runtime.graph.nodes(), 0.5, top));
         }
         "verify" => {
@@ -553,6 +701,11 @@ fn run() -> Result<(), String> {
             run_demo(args.budget).map_err(to_err)?;
         }
         "serve" => {
+            let file = args.session_policy.ok_or("serve needs --session-policy")?;
+            let stop = args
+                .stop_file
+                .unwrap_or_else(|| file.with_file_name("stop"));
+            let policy = dcr::SessionPolicy::open(file, Some(stop))?;
             let listener = std::net::TcpListener::bind(("127.0.0.1", args.port))
                 .map_err(|e| format!("bind 127.0.0.1:{}: {e}", args.port))?;
             println!(
@@ -563,7 +716,7 @@ fn run() -> Result<(), String> {
                 args.budget,
                 args.sessions,
             )));
-            dcr::sessions::serve(listener, router);
+            dcr::sessions::serve(listener, router, policy).map_err(|error| error.to_string())?;
         }
         "bench" => {
             let has = |name: &str| args.flags.iter().any(|f| f == name);
@@ -582,7 +735,8 @@ fn run() -> Result<(), String> {
             } else if has("--reactivation") {
                 run_reactivation(args.turns, args.budget).map_err(to_err)?;
             } else if has("--diverse") {
-                run_scaling_diverse(&[3_000, 10_000, 30_000, 80_000], args.budget).map_err(to_err)?;
+                run_scaling_diverse(&[3_000, 10_000, 30_000, 80_000], args.budget)
+                    .map_err(to_err)?;
             } else if has("--consolidate") {
                 run_consolidation(args.turns, args.budget).map_err(to_err)?;
             } else if has("--decay") {

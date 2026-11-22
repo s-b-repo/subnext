@@ -24,8 +24,21 @@ use crate::embed::{Embedder, HashingEmbedder, cosine};
 use crate::nodes::{Kind, L0Sizes, Node, Origin, Status};
 use crate::spans::RawStore;
 use crate::summarize::ExtractiveSummarizer;
-use crate::text::clip;
+use crate::text::{clip, sentence_ranges};
 use crate::tokens::Estimator;
+
+const MAX_EVIDENCE_BYTES: usize = 1024;
+
+#[derive(Clone, Copy)]
+pub(crate) struct EvidenceBudget {
+    pub(crate) tokens: usize,
+    pub(crate) encoded_bytes: Option<usize>,
+}
+
+pub(crate) struct EvidenceExcerpt<'a> {
+    pub(crate) text: &'a str,
+    pub(crate) focus: Option<std::ops::Range<usize>>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Level {
@@ -214,6 +227,93 @@ impl Ladder {
         }
     }
 
+    /// Evidence payload for a consumer that receives identity and provenance
+    /// as separate fields. Price the exact text the consumer receives.
+    pub(crate) fn render_evidence(
+        &self,
+        raw: &RawStore,
+        node: &Node,
+        level: Level,
+        query: &str,
+        budget: EvidenceBudget,
+        excerpts: &[EvidenceExcerpt<'_>],
+    ) -> Option<(String, usize)> {
+        let mut labels = Vec::new();
+        if level != Level::L0 && matches!(node.kind, Kind::Goal | Kind::Constraint | Kind::Decision)
+        {
+            labels.push(node.kind.as_str());
+        }
+        if node.status != Status::Fresh {
+            labels.push(node.status.as_str());
+        }
+        if node.origin != Origin::Observed {
+            labels.push(node.origin.as_str());
+        }
+        if !node.meta.corrected_by.is_empty() {
+            labels.push("partially superseded source");
+        }
+        let label = labels.join(", ");
+        let fit = |body: &str| {
+            if body.trim().is_empty() || body.len() > MAX_EVIDENCE_BYTES {
+                return None;
+            }
+            let text = if label.is_empty() {
+                body.to_string()
+            } else {
+                format!("{label}: {body}")
+            };
+            let cost = self.estimator.count(&text);
+            let fits = text.len() <= MAX_EVIDENCE_BYTES
+                && cost <= budget.tokens
+                && budget
+                    .encoded_bytes
+                    .is_none_or(|bytes| crate::json::evidence_line_bytes(text.trim()) <= bytes);
+            fits.then_some((text, cost))
+        };
+        match level {
+            Level::L0 => {
+                let excerpt = excerpts
+                    .iter()
+                    .find_map(|excerpt| fit(excerpt.text).or_else(|| fit_focus(excerpt, &fit)));
+                if excerpt.is_some() || excerpts.iter().any(|excerpt| excerpt.focus.is_some()) {
+                    return excerpt;
+                }
+                let raw = self.raw_text(raw, node);
+                let complete = fit(&raw);
+                match fitting_sentence(&raw, query, fit) {
+                    Some((excerpt, score))
+                        if complete.is_none() || score >= crate::policy::overlap(query, &raw) =>
+                    {
+                        Some(excerpt)
+                    }
+                    _ => complete,
+                }
+            }
+            Level::L1 => fit(&self.summary(raw, node)),
+            // Evidence nodes already hold raw text. A clipped prefix of that
+            // text is not a structured fact.
+            Level::L2 if node.kind == Kind::Evidence => None,
+            Level::L2 => fit(&state_value(node, clip(&node.value, 120))),
+            Level::L3 => fit(&state_value(node, format_number(self.result(node)?))),
+        }
+    }
+
+    pub(crate) fn l0_excerpt(
+        &self,
+        raw: &RawStore,
+        node: &Node,
+        query: &str,
+        budget: usize,
+    ) -> Option<(String, usize)> {
+        let raw = self.raw_text(raw, node);
+        fitting_sentence(&raw, query, |sentence| {
+            let text = format!("[{} L0 {} excerpt] \"{sentence}\"", node.id, node.label());
+            let cost = self.estimator.count(&text);
+            (cost <= budget).then_some((text, cost))
+        })
+        .map(|(excerpt, _)| excerpt)
+    }
+
     pub fn summary(&self, raw: &RawStore, node: &Node) -> String {
         if let Some(cached) = node.level_cache.borrow().l1.clone() {
             return cached;
@@ -252,10 +352,7 @@ impl Ladder {
     /// L1, or demotion stops being a saving.
     pub fn state_object(&self, node: &Node) -> String {
         let value = clip(&node.value, 120);
-        let mut bits = vec![match &node.key {
-            Some(key) => format!("{key} = {value}"),
-            None => value,
-        }];
+        let mut bits = vec![state_value(node, value)];
         if node.confidence < 0.999 {
             bits.push(format!("conf={:.2}", node.confidence));
         }
@@ -334,7 +431,7 @@ impl Ladder {
                 levels.push(Level::L1);
             }
         }
-        if node.kind == Kind::Calculation || node.meta.derivation.is_some() {
+        if self.result(node).is_some() {
             levels.push(Level::L3);
         }
         if node.kind == Kind::Evidence && !levels.contains(&Level::L0) {
@@ -367,6 +464,73 @@ impl Ladder {
         }
         built
     }
+}
+
+fn fit_focus(
+    excerpt: &EvidenceExcerpt<'_>,
+    fit: &impl Fn(&str) -> Option<(String, usize)>,
+) -> Option<(String, usize)> {
+    let focus = excerpt.focus.as_ref()?;
+    let text = excerpt.text;
+    let mut left = focus.start;
+    let mut right = focus.end;
+    let mut best = fit(text.get(left..right)?.trim())?;
+    // Expand the verbatim window by words while retaining the answer range.
+    loop {
+        let mut grew = false;
+        let before = text[..left].trim_end();
+        if !before.is_empty() {
+            let start = before.rfind(char::is_whitespace).map_or(0, |i| {
+                i + before[i..].chars().next().map_or(0, char::len_utf8)
+            });
+            if let Some(wider) = fit(text[start..right].trim()) {
+                left = start;
+                best = wider;
+                grew = true;
+            }
+        }
+        let after = text[right..].trim_start();
+        if !after.is_empty() {
+            let end =
+                text.len() - after.len() + after.find(char::is_whitespace).unwrap_or(after.len());
+            if let Some(wider) = fit(text[left..end].trim()) {
+                right = end;
+                best = wider;
+                grew = true;
+            }
+        }
+        if !grew {
+            return Some(best);
+        }
+    }
+}
+
+fn state_value(node: &Node, value: String) -> String {
+    match &node.key {
+        Some(key) => format!("{key} = {value}"),
+        None => value,
+    }
+}
+
+/// Find a whole matching sentence for a window that cannot hold the source.
+fn fitting_sentence(
+    raw: &str,
+    query: &str,
+    fit: impl Fn(&str) -> Option<(String, usize)>,
+) -> Option<((String, usize), f32)> {
+    let mut best = None;
+    let mut best_score = 0.0;
+    for (start, end) in sentence_ranges(raw) {
+        let sentence = raw[start..end].trim();
+        let score = crate::policy::overlap(query, sentence);
+        if score > best_score {
+            if let Some(option) = fit(sentence) {
+                best = Some((option, score));
+                best_score = score;
+            }
+        }
+    }
+    best
 }
 
 fn join_head(items: &[String], take: usize) -> String {

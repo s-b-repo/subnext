@@ -67,6 +67,7 @@ pub mod policy;
 pub mod runtime;
 pub mod scrub;
 pub mod scheduler;
+pub mod semantic;
 pub mod sessions;
 pub mod skills;
 pub mod spans;
@@ -79,7 +80,7 @@ pub mod trust;
 
 pub use authorization::{
     AuditLog, AuthorizationAuditLog, ContextAwareAuthorization, FailClosedAuthorizer,
-    FullAuditLog, MacaroonToken, Pep, PolicyDecisionPoint, PolicyEnforcementPoint, ScopedAuthToken,
+    FullAuditLog, Pep, PolicyDecisionPoint, PolicyEnforcementPoint, ScopedAuthToken, SessionPolicy,
 };
 pub use context_assembly::{EscalationAsAppend, StaticHeaderDynamicTrailer, stable_content_ordering};
 pub use durability::{

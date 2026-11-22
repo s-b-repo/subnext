@@ -34,6 +34,27 @@ Current task ───►│  small, high-attention     │
 **Solution B does not need to reason continuously.** It owns the *persistent universe of
 information*.
 
+### Nina working context
+
+Subnext owns the persistent workspace graph, source documents, and evidence
+retrieval. `context-read` returns a bounded array of versioned hits without
+writing a new record. Subnext prices the compact evidence text before selection
+and includes provenance in each hit. It can return a complete matching sentence
+from a longer span. Omni fits the selected evidence inside
+Nina's trained prefix width and preserves the current question. The native
+generator refines latent concept vectors and scores positions using its
+geometric metric before committing codes. That computational state ends with
+the request.
+[Omni context contract](https://github.com/s-b-repo/omni/blob/main/docs/CONTRACT.md#the-native-nina-route)
+· [Unifur worker guide](https://github.com/s-b-repo/unifur/blob/main/docs/Training-Guide.md#native-nina-workers)
+
+For a store with a semantic index, `context-read` searches a frozen snapshot
+of source sentences and live state. It checks factual candidates for a
+supported answer. When a full passage exceeds the runner's capacity, an
+answer-bearing excerpt can fit in its place. Omni supplies the remaining
+prefix bytes and packs complete JSON evidence strings. A fingerprint detects
+changes to the indexed corpus.
+
 ## The loop
 
 ```text

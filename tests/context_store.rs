@@ -31,14 +31,198 @@ fn write(path: &Path, value: &Json) {
     std::fs::write(path, value.to_json_string()).expect("write");
 }
 
+fn context_read(store: &Path, query: &str, budget: &str) -> std::process::Output {
+    context_read_with_bytes(store, query, budget, None)
+}
+
+fn context_read_with_bytes(
+    store: &Path,
+    query: &str,
+    budget: &str,
+    bytes: Option<usize>,
+) -> std::process::Output {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dcr"));
+    if let Some(bytes) = bytes {
+        command.env("DCR_EVIDENCE_BYTES", bytes.to_string());
+    } else {
+        command.env_remove("DCR_EVIDENCE_BYTES");
+    }
+    let mut child = command
+        .args(["context-read", "--budget", budget, "--store"])
+        .arg(store)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start context-read");
+    let _ = child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(query.as_bytes());
+    child.wait_with_output().expect("read output")
+}
+
+#[test]
+fn context_read_counts_escaped_lines_against_the_runner_budget() {
+    let dir = scratch("encoded-evidence");
+    std::fs::create_dir(&dir).unwrap();
+    let store = dir.join("memory.json");
+    let short = "Release phrase: \"café\".";
+    let mut runtime = dcr::Dcr::new(30);
+    runtime.ingest(short, Some("short")).unwrap();
+    runtime
+        .ingest(
+            "A separate release phrase and a very long description of its publication schedule.",
+            Some("long"),
+        )
+        .unwrap();
+    runtime.save(&store).unwrap();
+    let bytes = dcr::json::evidence_line_bytes(short);
+    let read = |bytes| {
+        let output =
+            context_read_with_bytes(&store, "Quote the exact release phrase", "30", Some(bytes));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        parse(std::str::from_utf8(&output.stdout).unwrap()).unwrap()
+    };
+    let hits = read(bytes);
+    let hits = hits.as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].get("text").and_then(Json::as_str), Some(short));
+    assert!(read(bytes - 1).as_array().unwrap().is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn files_under(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut pending = vec![path.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(entry) = pending.pop() {
+        if entry.is_dir() {
+            pending.extend(
+                std::fs::read_dir(entry)
+                    .unwrap()
+                    .map(|item| item.unwrap().path()),
+            );
+        } else {
+            files.push((entry.clone(), std::fs::read(entry).unwrap()));
+        }
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
+}
+
+#[test]
+fn context_read_fits_grounded_evidence_and_preserves_both_store_formats() {
+    use dcr::Dcr;
+    use dcr::tokens::estimate_tokens;
+
+    let dir = scratch("context-read");
+    std::fs::create_dir(&dir).unwrap();
+    let json = dir.join("memory.json");
+    let container = dir.join("memory");
+    let mut rt = Dcr::new(120);
+    rt.ingest("The parcel code is OLD-54.", Some("original"))
+        .unwrap();
+    let correction = "Correction: the parcel code is ZX-17.";
+    rt.ingest(correction, Some("revised")).unwrap();
+    let before_duplicate = rt.telemetry.history_tokens;
+    rt.ingest(correction, Some("revised")).unwrap();
+    assert_eq!(rt.telemetry.history_tokens, before_duplicate);
+    let quote = "Release phrase: café noir.";
+    let note =
+        "The observers collected soil samples from remote hills around the campus. ".repeat(5);
+    rt.ingest(&format!("{note}{quote}"), Some("note")).unwrap();
+    rt.save(&json).unwrap();
+    rt.save_context(&container, None).unwrap();
+    let reopened = Dcr::open_context(&container, 120).unwrap();
+    assert_eq!(
+        reopened.telemetry.history_tokens,
+        rt.telemetry.history_tokens
+    );
+    assert_eq!(
+        reopened.indexer.evidence_by_span,
+        rt.indexer.evidence_by_span
+    );
+
+    let snapshot = files_under(&dir);
+    for store in [&json, &container] {
+        for (query, budget, expected) in [
+            ("What is the parcel code?", 6, Some("parcel.code = ZX-17")),
+            ("Quote the exact release phrase.", 8, Some(quote)),
+            ("Quote the exact release phrase.", 120, Some(quote)),
+            ("Quote the exact release phrase.", 6, None),
+            ("When were the laundry deadlines?", 120, None),
+        ] {
+            let output = context_read(store, query, &budget.to_string());
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let envelope = parse(std::str::from_utf8(&output.stdout).unwrap()).unwrap();
+            let hits = envelope.as_array().unwrap();
+            assert_eq!(hits.len(), usize::from(expected.is_some()), "{query}");
+            if let Some(expected) = expected {
+                let hit = &hits[0];
+                let text = hit.get("text").and_then(Json::as_str).unwrap();
+                assert_eq!(hit.get("version").and_then(Json::as_u64), Some(1));
+                assert_eq!(text, expected);
+                assert!(estimate_tokens(text) <= budget);
+                let path = hit
+                    .get("provenance")
+                    .and_then(|p| p.get("path"))
+                    .and_then(Json::as_str)
+                    .unwrap();
+                let audit = std::process::Command::new(env!("CARGO_BIN_EXE_dcr"))
+                    .args(["explain", path, "--store"])
+                    .arg(store)
+                    .output()
+                    .unwrap();
+                assert!(audit.status.success());
+                assert!(String::from_utf8(audit.stdout).unwrap().contains(expected));
+            }
+        }
+    }
+    assert_eq!(files_under(&dir), snapshot);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn context_read_rejects_an_incomplete_store() {
+    let dir = scratch("context-read-missing-manifest");
+    std::fs::create_dir(&dir).unwrap();
+    let output = context_read(&dir, "What is the parcel code?", "12");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("no context store")
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn objects_are_addressed_by_their_content() {
     let dir = scratch("addressing");
     let mut store = ContextStore::create(&dir, "agent_7").expect("create");
 
-    let a = store.put(span("s_1", "the server ip is 10.0.9.7")).expect("put");
-    let b = store.put(span("s_1", "the server ip is 10.0.9.7")).expect("put");
-    let c = store.put(span("s_2", "the server ip is 10.0.9.8")).expect("put");
+    let a = store
+        .put(span("s_1", "the server ip is 10.0.9.7"))
+        .expect("put");
+    let b = store
+        .put(span("s_1", "the server ip is 10.0.9.7"))
+        .expect("put");
+    let c = store
+        .put(span("s_2", "the server ip is 10.0.9.8"))
+        .expect("put");
 
     // Same content, same address: re-putting is a no-op, not a duplicate.
     assert_eq!(a, b);
@@ -56,7 +240,9 @@ fn objects_are_addressed_by_their_content() {
 fn a_modified_object_no_longer_matches_its_address() {
     let dir = scratch("tamper");
     let mut store = ContextStore::create(&dir, "agent_7").expect("create");
-    let id = store.put(span("s_1", "the server ip is 10.0.9.7")).expect("put");
+    let id = store
+        .put(span("s_1", "the server ip is 10.0.9.7"))
+        .expect("put");
     store.commit(1, None).expect("commit");
 
     // Edit the object in place, exactly as a bad disk or a text editor would.
@@ -66,10 +252,7 @@ fn a_modified_object_no_longer_matches_its_address() {
     bytes[position] ^= 0x20;
     std::fs::write(&path, &bytes).expect("write");
 
-    assert!(matches!(
-        store.get(&id),
-        Err(ContextError::Corrupt { .. })
-    ));
+    assert!(matches!(store.get(&id), Err(ContextError::Corrupt { .. })));
     let report = store.verify(None);
     assert_eq!(report.objects_failed, vec![id]);
     assert!(!report.ok());
@@ -108,13 +291,20 @@ fn every_object_proves_against_the_committed_root() {
     let dir = scratch("proofs");
     let mut store = ContextStore::create(&dir, "agent_7").expect("create");
     let ids: Vec<String> = (0..7)
-        .map(|i| store.put(span(&format!("s_{i}"), &format!("body {i}"))).expect("put"))
+        .map(|i| {
+            store
+                .put(span(&format!("s_{i}"), &format!("body {i}")))
+                .expect("put")
+        })
         .collect();
     store.commit(1, None).expect("commit");
 
     for id in &ids {
         let hash = store.meta(id).expect("meta").hash;
-        assert!(store.proves(id, &hash), "{id} should prove against the root");
+        assert!(
+            store.proves(id, &hash),
+            "{id} should prove against the root"
+        );
     }
     // A digest that is not in the tree does not prove, even with a real proof.
     let outsider = dcr::sha256(b"never stored");
@@ -147,7 +337,9 @@ fn editing_history_invalidates_everything_after_it() {
     let dir = scratch("history");
     let mut store = ContextStore::create(&dir, "agent_7").expect("create");
     for i in 1..=3 {
-        store.put(span(&format!("s_{i}"), &format!("body {i}"))).expect("put");
+        store
+            .put(span(&format!("s_{i}"), &format!("body {i}")))
+            .expect("put");
         store.commit(i, None).expect("commit");
     }
 
@@ -177,7 +369,9 @@ fn an_old_but_well_formed_state_is_refused() {
     let dir = scratch("rollback");
     let mut store = ContextStore::create(&dir, "agent_7").expect("create");
     for i in 1..=4 {
-        store.put(span(&format!("s_{i}"), &format!("body {i}"))).expect("put");
+        store
+            .put(span(&format!("s_{i}"), &format!("body {i}")))
+            .expect("put");
         store.commit(i, None).expect("commit");
     }
     assert_eq!(store.generation(), 4);
@@ -236,7 +430,9 @@ fn quarantine_moves_the_object_and_records_why() {
     let id = store.put(span("s_1", "suspect material")).expect("put");
     store.commit(1, None).expect("commit");
 
-    let target = store.quarantine(&id, "hash mismatch during scrub").expect("quarantine");
+    let target = store
+        .quarantine(&id, "hash mismatch during scrub")
+        .expect("quarantine");
     assert!(target.exists());
     assert!(!store.object_path(&id).exists());
     assert!(store.get(&id).is_err());
@@ -253,7 +449,9 @@ fn quarantine_moves_the_object_and_records_why() {
 fn derived_objects_must_name_their_sources() {
     let dir = scratch("provenance");
     let mut store = ContextStore::create(&dir, "agent_7").expect("create");
-    let source = store.put(span("s_1", "the server ip is 10.0.9.7")).expect("put");
+    let source = store
+        .put(span("s_1", "the server ip is 10.0.9.7"))
+        .expect("put");
 
     let ungrounded = ObjectRecord::new(
         ObjectKind::Node,
@@ -310,7 +508,11 @@ fn a_signed_checkpoint_verifies_and_says_whether_it_is_real_crypto() {
 
     let reopened = ContextStore::open(&dir).expect("open");
     assert_eq!(
-        reopened.manifest().signing_key_id.as_ref().map(|k| k.id.clone()),
+        reopened
+            .manifest()
+            .signing_key_id
+            .as_ref()
+            .map(|k| k.id.clone()),
         Some(InsecureDevSigner::KEY_ID.to_string())
     );
     // The manifest must not let a development signer read as protection.
@@ -393,7 +595,9 @@ fn writes_leave_no_partial_files_behind() {
     let dir = scratch("atomic");
     let mut store = ContextStore::create(&dir, "agent_7").expect("create");
     for i in 0..4 {
-        store.put(span(&format!("s_{i}"), &format!("body {i}"))).expect("put");
+        store
+            .put(span(&format!("s_{i}"), &format!("body {i}")))
+            .expect("put");
     }
     store.commit(1, None).expect("commit");
 
@@ -469,7 +673,8 @@ fn an_edited_container_refuses_to_load() {
 
     let dir = scratch("edited");
     let mut rt = Dcr::new(600);
-    rt.ingest("The server ip is 10.0.4.12.", Some("t1")).expect("ingest");
+    rt.ingest("The server ip is 10.0.4.12.", Some("t1"))
+        .expect("ingest");
     rt.save_context(&dir, None).expect("save_context");
 
     // Rewrite one object's bytes — the edit a plain JSON store would accept
@@ -498,8 +703,11 @@ fn reads_and_unchanged_saves_do_not_mint_generations() {
 
     let dir = scratch("idempotent");
     let mut rt = Dcr::new(600);
-    rt.ingest("The server ip is 10.0.4.12 and the port is 8080.", Some("t1"))
-        .expect("ingest");
+    rt.ingest(
+        "The server ip is 10.0.4.12 and the port is 8080.",
+        Some("t1"),
+    )
+    .expect("ingest");
 
     let first = rt.save_context(&dir, None).expect("save");
     let objects_after_ingest = first.object_count;
@@ -527,8 +735,11 @@ fn read_counters_survive_a_container_round_trip() {
 
     let dir = scratch("usage");
     let mut rt = Dcr::new(600);
-    rt.ingest("The server ip is 10.0.4.12 and the port is 8080.", Some("t1"))
-        .expect("ingest");
+    rt.ingest(
+        "The server ip is 10.0.4.12 and the port is 8080.",
+        Some("t1"),
+    )
+    .expect("ingest");
     rt.ask("what is the server ip?", None);
     let admitted: Vec<(String, u32)> = rt
         .graph
@@ -537,7 +748,10 @@ fn read_counters_survive_a_container_round_trip() {
         .filter(|n| n.admits.get() > 0)
         .map(|n| (n.id.clone(), n.admits.get()))
         .collect();
-    assert!(!admitted.is_empty(), "the query should have admitted something");
+    assert!(
+        !admitted.is_empty(),
+        "the query should have admitted something"
+    );
     rt.save_context(&dir, None).expect("save");
 
     let restored = Dcr::open_context(&dir, 600).expect("open");

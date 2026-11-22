@@ -45,9 +45,8 @@ incoming context → State Indexer │
                       model
 ```
 
-The model never receives the entire context. Unlike RAG, the runtime does not retrieve
-documents — it retrieves *whichever representation is cheapest and sufficient* for the
-current computation.
+The model normally receives a planned working set. The runtime chooses a
+representation of each item that fits the budget and serves the current computation.
 
 ## Core ideas
 
@@ -75,6 +74,76 @@ current computation.
 - [Context integrity: the `.context` container](docs/architecture/context-integrity.md)
 - [Failure modes](docs/architecture/failure-modes.md)
 - [Workspace rebuild](docs/architecture/workspace-rebuild.md)
+
+### Persistent context for model runners
+
+Subnext owns persistent conversation memory, provenance, and retrieval. Use
+`dcr context-read --store <workspace-store> --budget 32` with the query on
+stdin to obtain compact evidence for one inference request. The budget covers
+the evidence text. Each version-1 hit carries an ID and a provenance path that
+`dcr explain` can resolve to a stored node or source span. The read leaves the
+store byte-identical. The inference worker discards its prompt, working set,
+and activations after the request. Write approved memory updates through
+Subnext. Keep model weights fixed when comparing retrieval quality.
+Omni's Nina route reads these versioned hits for one request and preserves the
+complete question. Nina keeps its internal latent refinement and learned
+metric. Subnext owns the evidence and provenance used as inputs.
+[Two-system split](docs/architecture/two-system-split.md)
+
+Training the codec and generator uses Unifur's accelerator and checkpoint
+budget. Size the Subnext store and optional semantic index for the evidence
+corpus and use the model's prompt width to set the per-request packing limit.
+[Nina training resources](https://github.com/s-b-repo/unifur/blob/main/docs/Training-Guide.md#training-resources)
+
+#### Learned retrieval for compact evidence
+
+`context-read` automatically uses a store's companion semantic index when one
+exists. The shortlist combines vector matches and lexical matches. For factual
+questions, an extractive reader looks for an answer in each passage, and a
+second model evaluates weak matches. The index contains derived vectors and
+source coordinates. Subnext resolves every returned passage and answer range
+against the store. Long sentences are indexed in overlapping passages. A
+returned passage can be shortened around a verified answer to fit a tight
+budget. The `DCR_EVIDENCE_BYTES` environment variable limits the combined
+size of the newline-delimited JSON evidence strings.
+
+Set up the CPU models once on x86-64. These commands run from the Subnext
+checkout. The runtime checks model files against pinned SHA-256 digests.
+
+```bash
+python3 -m venv .venv-semantic
+.venv-semantic/bin/python -m pip install -r scripts/semantic-requirements.txt
+export DCR_SEMANTIC_PYTHON="$PWD/.venv-semantic/bin/python"
+model_dir="$PWD/target/semantic-model"
+mkdir -p "$model_dir"
+encoder=https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/321b1453a093b6ed637ddb765600dbdd288610c8
+reranker=https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2/resolve/233902d25c440f23af6f7d6e94d2946bac0bee0a
+reader=https://huggingface.co/onnx-community/roberta-base-squad2-ONNX/resolve/6d1aeed784b6386659454d3be72de76fad8b73db
+answerability=https://huggingface.co/cross-encoder/qnli-distilroberta-base/resolve/7dd04ee0a6040c06fb381ad7edcb8585f4d937fd
+curl -fL "$encoder/onnx/model_quint8_avx2.onnx" -o "$model_dir/model.onnx"
+curl -fL "$encoder/tokenizer.json" -o "$model_dir/tokenizer.json"
+curl -fL "$reranker/onnx/model_quint8_avx2.onnx" -o "$model_dir/reranker.onnx"
+curl -fL "$reranker/tokenizer.json" -o "$model_dir/reranker-tokenizer.json"
+curl -fL "$reader/onnx/model_quantized.onnx" -o "$model_dir/reader.onnx"
+curl -fL "$reader/tokenizer.json" -o "$model_dir/reader-tokenizer.json"
+curl -fL "$answerability/onnx/model_quint8_avx2.onnx" -o "$model_dir/answerability.onnx"
+curl -fL "$answerability/tokenizer.json" -o "$model_dir/answerability-tokenizer.json"
+cargo build --release
+./target/release/dcr semantic-index --store /path/to/memory --semantic-model "$model_dir"
+printf '%s' 'Where did the cat snooze?' | ./target/release/dcr context-read --store /path/to/memory --budget 24
+```
+
+`dcr ingest` refreshes an existing index and reuses vectors for unchanged
+records. After writes from another program, run `semantic-index` to refresh
+the index before querying it. Retrieval runs offline after setup. An
+unconfigured store uses lexical retrieval. Pass `--lexical-only` to run that
+control on an indexed store. [Encoder](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) · [Reranker](https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2) · [Extractive reader](https://huggingface.co/deepset/roberta-base-squad2) · [Answerability model](https://huggingface.co/cross-encoder/qnli-distilroberta-base)
+
+Run the compact paraphrase benchmark with the same setup.
+
+```bash
+python3 scripts/bench-semantic.py --dcr target/release/dcr --model "$model_dir"
+```
 
 ## Also
 
@@ -180,25 +249,20 @@ cached prefixes, and that comparison has not been run.
 
 ### Poor fits
 
-**Short single-turn work.** One document, one question, no corrections. The
-indexing, the graph and the knapsack are pure overhead — use retrieval, or just
-put the document in the prompt.
+**Short single-turn work.** One document and one question can take a direct
+path with a raw-text reasoner. `dcr ask --fit-gate --endpoint HOST:PORT` skips
+planning when the rendered history and question fit and the graph contains
+only observed, unrevised material.
 
 **Tasks needing the full text verbatim.** DCR deliberately serves the cheapest
 sufficient representation. It can escalate to raw bytes when a probe demands an
 exact quote, and it charges for that, but if most of your queries need the whole
 source then bounded attention is the wrong objective.
 
-**Semantic search over paraphrase.** The bundled embedder is a 256-dimensional
-hashing embedding, not a learned one; it finds material that shares vocabulary.
-`bench --channels` now measures how much that makes the lexical and vector
-channels agree, instead of asserting it: they share 2.7x more than chance, and
-195 of 220 ranked positions across the probe set came from exactly one channel.
-So "correlated rather than independent evidence" was directionally right and
-overstated. What is still unmeasured is paraphrase itself — the seven probes are
-answerable by vocabulary overlap. Swapping in a learned embedder is a
-constructor argument (`Ladder::embedder`, see `examples/custom_embedder.rs`),
-and it costs the offline, deterministic property every figure here depends on.
+**Semantic search with the hashing embedder.** The reference planner depends
+on shared vocabulary. `bench --channels` compares its lexical and hashing
+channels on the standard corpus. For paraphrased questions, use the compact
+route with [learned retrieval](#learned-retrieval-for-compact-evidence).
 
 **~~Reasoners that cannot signal.~~ Retracted.** This said a harness unable to
 emit `#ESCALATE` loses the exact-quote and buried-detail probes, citing the

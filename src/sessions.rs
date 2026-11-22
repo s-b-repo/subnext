@@ -11,6 +11,9 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+
+use crate::authorization::{valid_label, PolicyEnforcementPoint, SessionPolicy};
 
 use crate::runtime::Dcr;
 
@@ -27,6 +30,7 @@ pub struct SessionRouter {
     budget: usize,
     capacity: usize,
     sessions: HashMap<String, Arc<Mutex<Dcr>>>,
+    ingested_bytes: HashMap<String, usize>,
     /// Oldest first, refreshed on touch.
     lru: VecDeque<String>,
     /// Sessions dropped to make room. A rising counter means capacity is too
@@ -40,6 +44,7 @@ impl SessionRouter {
             budget,
             capacity: capacity.max(1),
             sessions: HashMap::new(),
+            ingested_bytes: HashMap::new(),
             lru: VecDeque::new(),
             evicted: 0,
         }
@@ -66,6 +71,7 @@ impl SessionRouter {
                     .map(|pos| self.lru.remove(pos).unwrap());
                 if let Some(oldest) = victim {
                     self.sessions.remove(&oldest);
+                    self.ingested_bytes.remove(&oldest);
                     self.evicted += 1;
                 }
                 // If every session is in flight, capacity is exceeded rather
@@ -80,6 +86,19 @@ impl SessionRouter {
         self.lru.retain(|id| id != session);
         self.lru.push_back(session.to_string());
         self.sessions[session].clone()
+    }
+
+    fn route_request(&mut self, session: &str, bytes: usize) -> Option<Arc<Mutex<Dcr>>> {
+        if !self.sessions.contains_key(session) && self.sessions.len() >= self.capacity
+            && self.sessions.values().all(|runtime| Arc::strong_count(runtime) > 1) {
+            return None;
+        }
+        let used = self.ingested_bytes.get(session).copied().unwrap_or(0);
+        let total = used.checked_add(bytes)?;
+        if total > MAX_INGEST_BODY { return None; }
+        let runtime = self.route(session);
+        self.ingested_bytes.insert(session.to_string(), total);
+        Some(runtime)
     }
 
     pub fn len(&self) -> usize {
@@ -98,99 +117,105 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Serve sessions over TCP until the listener errors. One thread per
-/// connection; connections are cheap because the runtimes do the work.
-///
-/// Protocol, line-based commands with length-prefixed bodies where needed:
-///
-/// ```text
-/// C: INGEST <session> <byte-len>\n<body>
-/// S: OK\n
-/// C: ASK <session> <query...>\n
-/// S: OK <byte-len>\n<answer>
-/// S: ERR <message>\n
-/// ```
-pub fn serve(listener: TcpListener, router: Arc<Mutex<SessionRouter>>) {
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
+/// Serve scoped sessions over loopback. Authenticate each connection using
+/// `AUTH <credential>`, then address sessions as `<workspace>/<session>`.
+/// The operator policy is re-read before each operation.
+pub fn serve(listener: TcpListener, router: Arc<Mutex<SessionRouter>>, policy: SessionPolicy) -> std::io::Result<()> {
+    if !listener.local_addr()?.ip().is_loopback() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "session listener must bind to loopback"));
+    }
+    listener.set_nonblocking(true)?;
+    let connections = Arc::new(());
+    while policy.running() {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                if Arc::strong_count(&connections) > 32 || stream.set_nonblocking(false).is_err() {
+                    continue;
+                }
                 let router = Arc::clone(&router);
-                std::thread::spawn(move || handle(stream, router));
+                let policy = policy.clone();
+                let slot = Arc::clone(&connections);
+                std::thread::spawn(move || {
+                    let _slot = slot;
+                    handle(stream, router, &policy);
+                });
             }
-            Err(e) => eprintln!("accept failed: {e}"),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(25)),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
         }
     }
+    Ok(())
 }
 
-/// Largest single INGEST body, in bytes. The body is allocated up front from
-/// the client-supplied length, so an uncapped length is a one-line memory
-/// exhaustion against the server.
 const MAX_INGEST_BODY: usize = 16 * 1024 * 1024;
-
-/// Idle-connection deadline. Threads are spawned per connection and never
-/// reaped while a client holds one open silently, so a connection that stops
-/// talking must eventually cost nothing.
-const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_FRAME: u64 = 16_384;
 
 fn respond(stream: &mut TcpStream, text: &str) {
-    let _ = stream.write_all(text.as_bytes());
+    drop(stream.write_all(text.as_bytes()));
 }
 
-fn handle(mut stream: TcpStream, router: Arc<Mutex<SessionRouter>>) {
-    let Ok(read_half) = stream.try_clone() else {
+fn read_frame(reader: &mut impl BufRead) -> Option<String> {
+    let mut line = String::new();
+    let size = reader.take(MAX_FRAME + 1).read_line(&mut line).ok()? as u64;
+    (size <= MAX_FRAME && line.ends_with('\n')).then(|| line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+fn handle(mut stream: TcpStream, router: Arc<Mutex<SessionRouter>>, policy: &SessionPolicy) {
+    let Ok(read_half) = stream.try_clone() else { return; };
+    if read_half.set_read_timeout(Some(READ_TIMEOUT)).is_err() || stream.set_write_timeout(Some(READ_TIMEOUT)).is_err() { return; }
+    let mut reader = BufReader::new(read_half);
+    let login = read_frame(&mut reader);
+    let Some(credential) = login.as_deref().and_then(|line| line.strip_prefix("AUTH ")) else {
+        respond(&mut stream, "ERR authentication required\n");
         return;
     };
-    if read_half.set_read_timeout(Some(READ_TIMEOUT)).is_err() {
+    if policy.authenticate(credential).is_none() {
+        respond(&mut stream, "ERR authentication required\n");
         return;
     }
-    let mut reader = BufReader::new(read_half);
-    loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => return,
-            Err(e) => {
-                if e.kind() != std::io::ErrorKind::WouldBlock
-                    && e.kind() != std::io::ErrorKind::TimedOut
-                {
-                    eprintln!("session read failed: {e}");
-                }
-                return;
-            }
-            Ok(_) => {}
+    respond(&mut stream, "OK\n");
+    let mut gate = PolicyEnforcementPoint::default();
+    for _ in 0..128 {
+        let Some(line) = read_frame(&mut reader) else { return; };
+        let mut parts = line.splitn(3, ' ');
+        let (Some(command), Some(target), Some(argument)) = (parts.next(), parts.next(), parts.next()) else { return; };
+        let Some((workspace, session)) = target.split_once('/') else { return; };
+        let operation = match command { "ASK" => "ask", "INGEST" => "ingest", _ => return };
+        let identity = policy.authenticate(credential);
+        if !valid_label(session) || !gate.enforce(identity.as_ref(), operation, workspace) {
+            respond(&mut stream, "ERR session access denied\n");
+            return;
         }
-        let mut parts = line.trim_end_matches(['\r', '\n']).splitn(3, ' ');
-        match (parts.next(), parts.next(), parts.next()) {
-            (Some("ASK"), Some(session), Some(query)) if !session.is_empty() => {
-                let dcr = lock(&router).route(session);
-                let answer = lock(&dcr).ask(query, None);
+
+        let body = if operation == "ingest" {
+            let Some(length) = argument.trim().parse::<usize>().ok().filter(|n| *n <= MAX_INGEST_BODY) else {
+                respond(&mut stream, "ERR invalid ingest length\n");
+                return;
+            };
+            let mut body = vec![0u8; length];
+            if reader.read_exact(&mut body).is_err() { return; }
+            Some(body)
+        } else {
+            None
+        };
+        let Some(runtime) = lock(&router).route_request(target, body.as_ref().map_or(0, Vec::len)) else {
+            respond(&mut stream, "ERR session capacity reached\n");
+            continue;
+        };
+        let mut runtime = lock(&runtime);
+        let identity = policy.authenticate(credential);
+        if !gate.enforce(identity.as_ref(), operation, workspace) { return; }
+        match body {
+            Some(body) => match runtime.ingest(&String::from_utf8_lossy(&body), None) {
+                Ok(_) => respond(&mut stream, "OK\n"),
+                Err(e) => respond(&mut stream, &format!("ERR {e}\n")),
+            },
+            None => {
+                let answer = runtime.ask(argument, None);
                 respond(&mut stream, &format!("OK {}\n{}", answer.text.len(), answer.text));
             }
-            (Some("INGEST"), Some(session), Some(rest)) if !session.is_empty() => {
-                let length = rest.trim().parse::<usize>().ok();
-                match length {
-                    Some(length) if length > MAX_INGEST_BODY => {
-                        respond(&mut stream, "ERR ingest body exceeds 16 MiB cap\n");
-                    }
-                    Some(length) => {
-                        let mut body = vec![0u8; length];
-                        if reader.read_exact(&mut body).is_err() {
-                            respond(&mut stream, "ERR truncated ingest body\n");
-                            return;
-                        }
-                        let text = String::from_utf8_lossy(&body).to_string();
-                        let dcr = lock(&router).route(session);
-                        match lock(&dcr).ingest(&text, None) {
-                            Ok(_) => respond(&mut stream, "OK\n"),
-                            Err(e) => respond(&mut stream, &format!("ERR {e}\n")),
-                        }
-                    }
-                    None => respond(&mut stream, "ERR usage: INGEST <session> <byte-len>\n"),
-                }
-            }
-            _ => respond(
-                &mut stream,
-                "ERR usage: ASK <session> <query> | INGEST <session> <byte-len>\n",
-            ),
         }
     }
 }

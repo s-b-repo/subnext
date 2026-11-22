@@ -8,17 +8,11 @@
 //! detects that shape and bypasses the machinery rather than pretending the
 //! overhead is free.
 //!
-//! Two deliberate limits:
-//!
-//! * A store with skills registered never bypasses — admission is what loads
-//!   them, and skipping the planner would leave them dormant.
-//! * The bypass sends raw history, so it is only as good as the reasoner's
-//!   ability to read raw text. `LocalReasoner` is a line-matcher over the
-//!   assembled format and answers nothing from it; the gate is for real
-//!   reasoners, which is exactly the deployment it exists for.
+//! Bypass is for raw-text reasoners and histories whose graph adds no state
+//! needed for the answer. Revisions, inferred state and skills need planning.
 
 use crate::graph::MemoryGraph;
-use crate::nodes::Kind;
+use crate::nodes::{Kind, Origin, Status};
 
 /// What the gate decided. Kept as an enum rather than a bool so the reason is
 /// part of the type a caller matches on — a bypass is a shortcut that must
@@ -32,11 +26,22 @@ pub enum Fit {
     Plan,
 }
 
-/// The decision, from the two numbers that define it plus the skills check.
+/// Assess the size and whether raw history preserves the graph's current state.
 pub fn assess(graph: &MemoryGraph, history_tokens: usize, budget: usize) -> Fit {
-    if history_tokens <= budget && !graph.nodes().iter().any(|n| n.kind == Kind::Skill) {
+    if history_tokens <= budget && can_bypass(graph) {
         Fit::Bypass
     } else {
         Fit::Plan
     }
+}
+
+pub(crate) fn can_bypass(graph: &MemoryGraph) -> bool {
+    graph.nodes().iter().all(|node| {
+        matches!(node.status, Status::Fresh | Status::Unresolved)
+            && node.origin == Origin::Observed
+            && !matches!(node.kind, Kind::Calculation | Kind::Skill)
+            && !node.source_spans.is_empty()
+            && !node.meta.superseded_source
+            && node.meta.corrected_by.is_empty()
+    })
 }

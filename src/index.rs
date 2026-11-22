@@ -401,6 +401,25 @@ impl HybridIndex {
         self.span_vector.add_text(idx, text);
     }
 
+    pub(crate) fn lexical_matches(
+        &self,
+        namespace: Namespace,
+        query: &str,
+        k: usize,
+    ) -> Vec<(usize, f32)> {
+        let index = match namespace {
+            Namespace::Node => &self.node_lexical,
+            Namespace::Span => &self.span_lexical,
+        };
+        let mut hits = index.search(query, k);
+        if let Some((_, highest)) = hits.first().copied() {
+            for (_, score) in &mut hits {
+                *score /= highest;
+            }
+        }
+        hits
+    }
+
     pub fn search(
         &self,
         namespace: Namespace,
